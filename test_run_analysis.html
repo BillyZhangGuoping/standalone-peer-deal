@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>test_run.py 目标仓位计算分析</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1, h2, h3, h4 {
+            color: #2c3e50;
+        }
+        h1 {
+            text-align: center;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }
+        h2 {
+            margin-top: 30px;
+            border-left: 5px solid #3498db;
+            padding-left: 15px;
+        }
+        h3 {
+            margin-top: 20px;
+            color: #3498db;
+        }
+        .code-block {
+            background-color: #f8f9fa;
+            border: 1px solid #e1e4e8;
+            border-radius: 5px;
+            padding: 15px;
+            overflow-x: auto;
+            margin: 15px 0;
+        }
+        .code-line {
+            font-family: 'Courier New', Courier, monospace;
+            line-height: 1.5;
+        }
+        .highlight {
+            background-color: #fff3cd;
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+        .step {
+            background-color: #e3f2fd;
+            border: 1px solid #bbdefb;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .step-number {
+            font-weight: bold;
+            color: #1976d2;
+            margin-right: 10px;
+        }
+        .example {
+            background-color: #f1f8e9;
+            border: 1px solid #c8e6c9;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .formula {
+            text-align: center;
+            font-style: italic;
+            margin: 10px 0;
+            font-size: 1.1em;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 15px 0;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        .note {
+            background-color: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 10px;
+            margin: 15px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>test_run.py 每日目标仓位计算分析</h1>
+    
+    <h2>1. 整体流程概述</h2>
+    <p>test_run.py 用于生成每日目标仓位，核心流程如下：</p>
+    <ol>
+        <li>加载所有历史数据</li>
+        <li>从指定日期（2024-07-01）开始，遍历每个交易日</li>
+        <li>对每个交易日，筛选截至该日的所有数据</li>
+        <li>对每个品种，选择最新合约</li>
+        <li>计算每个品种的目标仓位</li>
+        <li>保存每日目标仓位到CSV文件</li>
+    </ol>
+    
+    <h2>2. 核心代码分析</h2>
+    
+    <h3>2.1 配置参数</h3>
+    <div class="code-block">
+        <div class="code-line"># 配置参数</div>
+        <div class="code-line">CAPITAL = 10000000  # 总资金为一千万</div>
+        <div class="code-line">START_DATE = '2024-07-01'  # 开始日期</div>
+        <div class="code-line">RISK_PER_TRADE = 0.02  # 每笔交易风险比例</div>
+        <div class="code-line">DATA_DIR = 'History_Data/hot_daily_market_data'  # 历史数据目录</div>
+        <div class="code-line">OUTPUT_DIR = 'target_position'  # 输出目录</div>
+    </div>
+    
+    <h3>2.2 数据加载</h3>
+    <div class="code-block">
+        <div class="code-line">def load_all_data(data_dir):</div>
+        <div class="code-line">    """加载所有历史数据"""</div>
+        <div class="code-line">    all_data = []</div>
+        <div class="code-line">    files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]</div>
+        <div class="code-line">    </div>
+        <div class="code-line">    for file in files:</div>
+        <div class="code-line">        file_path = os.path.join(data_dir, file)</div>
+        <div class="code-line">        df = pd.read_csv(file_path, index_col=0, parse_dates=True)</div>
+        <div class="code-line">        # 保留原始symbol列，不做修改</div>
+        <div class="code-line">        all_data.append(df)</div>
+        <div class="code-line">    </div>
+        <div class="code-line">    # 合并所有数据</div>
+        <div class="code-line">    combined_df = pd.concat(all_data)</div>
+        <div class="code-line">    return combined_df</div>
+    </div>
+    
+    <h3>2.3 目标仓位计算主函数</h3>
+    <div class="code-block">
+        <div class="code-line">def calculate_target_positions(data, capital, risk_per_trade, target_date):</div>
+        <div class="code-line">    """计算目标仓位"""</div>
+        <div class="code-line">    # 筛选目标日期及之前的数据</div>
+        <div class="code-line">    data = data[data.index <= target_date]</div>
+        <div class="code-line">    </div>
+        <div class="code-line">    # 提取品种基础代码（如a2409.DCE → A）</div>
+        <div class="code-line">    data['base_symbol'] = data['symbol'].str.extract(r'^([a-zA-Z]+)')[0].str.upper()</div>
+        <div class="code-line">    </div>
+        <div class="code-line">    # 对每个品种基础代码，按日期降序排序，取最新的一个合约</div>
+        <div class="code-line">    latest_contracts = []</div>
+        <div class="code-line">    for base_symbol, group in data.groupby('base_symbol'):</div>
+        <div class="code-line">        latest_contract = group.sort_index(ascending=False).iloc[0]</div>
+        <div class="code-line">        latest_contracts.append(latest_contract)</div>
+        <div class="code-line">    </div>
+        <div class="code-line">    # 计算每个品种的目标仓位...</div>
+    </div>
+    
+    <h2>3. 以a品种为例的具体计算过程</h2>
+    <p>以a品种（豆一）为例，追踪2024-07-01目标仓位的计算过程：</p>
+    
+    <div class="example">
+        <h3>日期：2024-07-01</h3>
+        <h4>步骤1：筛选数据</h4>
+        <div class="step">
+            <span class="step-number">1.1</span> 筛选截至2024-07-01的所有数据：
+            <div class="code-block">
+                <div class="code-line">data = data[data.index <= '2024-07-01']</div>
+            </div>
+        </div>
+        
+        <h4>步骤2：选择最新合约</h4>
+        <div class="step">
+            <span class="step-number">2.1</span> 提取基础代码：
+            <p>对于a品种，所有合约（如a2409.DCE, a2501.DCE等）的基础代码均为"A"</p>
+        </div>
+        
+        <div class="step">
+            <span class="step-number">2.2</span> 按日期降序排序，选择最新合约：
+            <p>在2024-07-01，a品种的最新合约为 <span class="highlight">a2409.DCE</span></p>
+        </div>
+        
+        <h4>步骤3：获取合约数据</h4>
+        <table>
+            <tr>
+                <th>字段</th>
+                <th>值</th>
+            </tr>
+            <tr>
+                <td>symbol</td>
+                <td>a2409.DCE</td>
+            </tr>
+            <tr>
+                <td>close（收盘价）</td>
+                <td>假设为 4270.0 元/吨</td>
+            </tr>
+        </table>
+        
+        <h4>步骤4：计算ATR（平均真实波动幅度）</h4>
+        <div class="step">
+            <span class="step-number">4.1</span> 简化处理：使用收盘价的1%作为ATR
+            <div class="formula">
+                ATR = current_price × 0.01 = 4270.0 × 0.01 = 42.7 元/吨
+            </div>
+        </div>
+        
+        <h4>步骤5：计算止损价格</h4>
+        <div class="step">
+            <span class="step-number">5.1</span> 止损价格 = 收盘价 - ATR
+            <div class="formula">
+                stop_loss_price = current_price - ATR = 4270.0 - 42.7 = 4227.3 元/吨
+            </div>
+        </div>
+        
+        <h4>步骤6：计算仓位大小</h4>
+        <p>调用 <code>calculate_position_size</code> 函数计算仓位大小，该函数位于position.py中。</p>
+        
+        <div class="step">
+            <span class="step-number">6.1</span> 计算风险金额：
+            <div class="formula">
+                risk_amount = capital × risk_per_trade = 10,000,000 × 0.02 = 200,000 元
+            </div>
+        </div>
+        
+        <div class="step">
+            <span class="step-number">6.2</span> 计算每手风险：
+            <div class="formula">
+                risk_per_contract = (entry_price - stop_loss_price) × contract_multiplier
+            </div>
+            <p>其中，contract_multiplier（合约乘数）从all_instruments_info.csv获取，对于a品种为10吨/手</p>
+            <div class="formula">
+                risk_per_contract = (4270.0 - 4227.3) × 10 = 42.7 × 10 = 427 元/手
+            </div>
+        </div>
+        
+        <div class="step">
+            <span class="step-number">6.3</span> 计算仓位大小：
+            <div class="formula">
+                position_size = risk_amount ÷ risk_per_contract = 200,000 ÷ 427 ≈ 468 手
+            </div>
+        </div>
+        
+        <h4>步骤7：计算持仓价值和保证金占用</h4>
+        <div class="step">
+            <span class="step-number">7.1</span> 持仓价值：
+            <div class="formula">
+                position_value = position_size × current_price × contract_multiplier
+            </div>
+            <div class="formula">
+                position_value = 468 × 4270.0 × 10 = 19,983,600 元
+            </div>
+        </div>
+        
+        <div class="step">
+            <span class="step-number">7.2</span> 保证金占用（假设保证金率为10%）：
+            <div class="formula">
+                margin_usage = position_value × 0.1 = 19,983,600 × 0.1 = 1,998,360 元
+            </div>
+        </div>
+        
+        <h4>步骤8：生成目标仓位记录</h4>
+        <table>
+            <tr>
+                <th>字段</th>
+                <th>值</th>
+            </tr>
+            <tr>
+                <td>symbol</td>
+                <td>a2409.DCE</td>
+            </tr>
+            <tr>
+                <td>current_price</td>
+                <td>4270.0</td>
+            </tr>
+            <tr>
+                <td>stop_loss_price</td>
+                <td>4227.3</td>
+            </tr>
+            <tr>
+                <td>contract_multiplier</td>
+                <td>10</td>
+            </tr>
+            <tr>
+                <td>position_size</td>
+                <td>468</td>
+            </tr>
+            <tr>
+                <td>position_value</td>
+                <td>19,983,600</td>
+            </tr>
+            <tr>
+                <td>margin_usage</td>
+                <td>1,998,360</td>
+            </tr>
+            <tr>
+                <td>risk_amount</td>
+                <td>200,000</td>
+            </tr>
+            <tr>
+                <td>margin_rate</td>
+                <td>0.1</td>
+            </tr>
+            <tr>
+                <td>total_capital</td>
+                <td>10,000,000</td>
+            </tr>
+            <tr>
+                <td>market_value</td>
+                <td>19,983,600</td>
+            </tr>
+        </table>
+        
+        <h4>步骤9：保存目标仓位</h4>
+        <p>将上述记录保存到 <code>target_position/target_positions_20240701.csv</code> 文件中。</p>
+    </div>
+    
+    <h2>4. 每日重复计算</h2>
+    <p>对于每个交易日，上述过程都会重复执行：</p>
+    <ol>
+        <li>2024-07-01：使用截至该日的数据，生成target_positions_20240701.csv</li>
+        <li>2024-07-02：使用截至该日的数据，生成target_positions_20240702.csv</li>
+        <li>2024-07-03：使用截至该日的数据，生成target_positions_20240703.csv</li>
+        <li>...</li>
+        <li>直到历史数据的最后一个交易日</li>
+    </ol>
+    
+    <h2>5. 关键注意事项</h2>
+    <div class="note">
+        <h4>5.1 数据使用限制</h4>
+        <p>生成 <code>target_positions_YYYYMMDD.csv</code> 时，<strong>仅使用截至该日期的数据</strong>，确保不会使用未来数据，符合回测的真实性要求。</p>
+    </div>
+    
+    <div class="note">
+        <h4>5.2 最新合约选择</h4>
+        <p>通过 <code>base_symbol</code> 分组并按日期降序排序，确保每个品种只保留最新合约，避免重复持仓。</p>
+    </div>
+    
+    <div class="note">
+        <h4>5.3 风险控制</h4>
+        <p>每笔交易的风险金额固定为总资金的2%，通过ATR计算合理的仓位大小，实现风险控制。</p>
+    </div>
+    
+    <h2>6. 输出文件格式</h2>
+    <p>每日生成的CSV文件包含以下字段：</p>
+    <table>
+        <tr>
+            <th>字段名</th>
+            <th>说明</th>
+        </tr>
+        <tr>
+            <td>symbol</td>
+            <td>合约代码（如a2409.DCE）</td>
+        </tr>
+        <tr>
+            <td>current_price</td>
+            <td>收盘价</td>
+        </tr>
+        <tr>
+            <td>stop_loss_price</td>
+            <td>止损价格</td>
+        </tr>
+        <tr>
+            <td>contract_multiplier</td>
+            <td>合约乘数</td>
+        </tr>
+        <tr>
+            <td>position_size</td>
+            <td>目标仓位大小（手）</td>
+        </tr>
+        <tr>
+            <td>position_value</td>
+            <td>持仓价值</td>
+        </tr>
+        <tr>
+            <td>margin_usage</td>
+            <td>保证金占用</td>
+        </tr>
+        <tr>
+            <td>risk_amount</td>
+            <td>风险金额</td>
+        </tr>
+        <tr>
+            <td>margin_rate</td>
+            <td>保证金率</td>
+        </tr>
+        <tr>
+            <td>total_capital</td>
+            <td>总资金</td>
+        </tr>
+        <tr>
+            <td>market_value</td>
+            <td>市值（与position_value相同）</td>
+        </tr>
+    </table>
+    
+    <h2>7. 总结</h2>
+    <p>test_run.py 通过严格的数据筛选、最新合约选择和风险控制，生成了符合要求的每日目标仓位。以a品种为例，我们详细追踪了其从数据筛选到仓位计算的完整过程，展示了系统的严谨性和合理性。</p>
+    
+    <p>该脚本生成的每日目标仓位文件，为后续的回测提供了基础数据，确保了回测结果的真实性和可靠性。</p>
+</body>
+</html>

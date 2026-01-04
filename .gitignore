@@ -1,0 +1,96 @@
+# 忽略的文件类型
+*.csv
+*.pyd
+*.png
+*.txt
+*.xlsx
+*.zip
+*.rar
+*.tar.gz
+*.7z
+*.exe
+*.msi
+*.zip
+*.gz
+*.pdf
+*.docx
+*.xls
+*.jpg
+*.jpeg
+*.ico
+*.ipynb
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# 忽略的目录
+__pycache__/
+History_Data/
+hot_daily_market_data/
+random_forest_strategy/target_position/
+validation_result/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.env
+
+# 忽略的特定文件
+pyd_back
+pyd_reconstruction
+*.pyc
+*.pyo
+*.so
+*.dylib
+*.dll
+
+# 忽略的IDE相关文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 忽略的操作系统相关文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 忽略的测试文件
+*.test.py
+*_test.py
+
+# 忽略的日志文件
+*.log
+logs/
+
+# 忽略的配置文件
+.env
+.env.local
+.env.*.local
+
+# 忽略的缓存文件
+.cache/
+
+# 忽略的数据库文件
+*.db
+*.sqlite3
+*.sqlite
+
+# 忽略的备份文件
+*.bak
+*.backup
+*.old
+
+# 忽略的临时文件
+*.tmp
+*.temp
+/tmp/
+/temp/

@@ -49,8 +49,9 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
             # 获取该品种在该日期之前的数据
             past_data = data[data.index <= date]
             
-            # 检查数据量是否足够：需要至少360天数据
-            if len(past_data) < 360:
+            # 检查数据量是否足够：只需要满足训练所需的最少数据量
+            # 由于模型训练需要至少100条数据，这里保持100天的限制
+            if len(past_data) < 100:
                 continue
             
             # 1. 创建LSTM特征
@@ -63,7 +64,7 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
             final_data = create_market_state_features(atr_featured_data.copy())
             
             # 检查是否需要重新训练模型
-            if model_manager.should_retrain(base_symbol):
+            if model_manager.should_retrain(base_symbol, current_date=date):
                 logger.info(f"训练{base_symbol}模型...")
                 model_manager.train_model(base_symbol, final_data, features)
             
@@ -83,7 +84,7 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
             # 计算动态ATR
             dynamic_atr = calculate_dynamic_atr(final_data).loc[date]
             
-            # 收集品种数据
+            # 收集品种数据，包括当日open_interest
             varieties_data[base_symbol] = {
                 'current_price': current_price,
                 'atr': dynamic_atr,
@@ -93,18 +94,31 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
                 'pred': pred,
                 'atr_14': current_data['atr_14'],
                 'atr_quantile': current_data['atr_14_quantile'],
+                'open_interest': data.loc[date]['open_interest'],
                 'final_data': final_data
             }
         
-        # 第二步：生成信号
+        # 第二步：生成信号并计算风险调整后的头寸
         if varieties_data:
-            # 生成组合信号
-            from signal_generation import generate_combined_signals
-            signals = generate_combined_signals(model_manager, all_data, features, date)
+            from signal_generation import generate_lstm_signals, filter_signals, normalize_signals
+            
+            # 收集预测结果
+            predictions = {}
+            for symbol, data in varieties_data.items():
+                predictions[symbol] = data['pred']
+            
+            # 生成初始信号
+            initial_signals = generate_lstm_signals(predictions)
+            
+            # 过滤信号
+            filtered_signals = filter_signals(initial_signals)
+            
+            # 截面标准化
+            normalized_signals = normalize_signals(filtered_signals)
             
             # 第三步：计算风险调整后的头寸
             positions = {}
-            for symbol, signal_info in signals.items():
+            for symbol, signal_info in normalized_signals.items():
                 if symbol not in varieties_data:
                     continue
                 
@@ -113,7 +127,7 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
                 pred_volatility = data['pred']['volatility']
                 
                 # 获取实际波动率（最近20日）
-                actual_volatility = data['final_data']['volatility_20'].loc[date]
+                actual_volatility = data['final_data']['volatility_20'].loc[date] if 'volatility_20' in data['final_data'].columns else None
                 
                 # 计算风险调整后的头寸
                 position = calculate_risk_adjusted_position(
@@ -134,7 +148,8 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
             adjusted_positions = apply_position_constraints(
                 positions=positions,
                 varieties_data=varieties_data,
-                total_capital=capital
+                total_capital=capital,
+                max_open_interest_ratio=0.001  # 使用0.001作为持仓上限
             )
             
             # 第五步：生成最终头寸
@@ -143,7 +158,7 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
                     continue
                 
                 data = varieties_data[symbol]
-                signal_info = signals[symbol]
+                signal_info = normalized_signals[symbol]
                 
                 # 计算持仓价值
                 position_value = abs(position) * data['current_price'] * data['contract_multiplier']

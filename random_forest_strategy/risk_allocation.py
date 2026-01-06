@@ -135,41 +135,90 @@ def atr_momentum_composite_allocation(total_capital, varieties_data, momentum_wi
     """ 
     ATR权重 + 动量信号复合分配 
     波动率低的品种 + 动量强的品种 = 高权重 
+    使用mom.py中的三个动量指标综合判断动量强度 
     """ 
     import numpy as np
+    import pandas as pd
+    from mom import calculate_momentum, calculate_dual_momentum, generate_cross_sectional_momentum_signal
     weights = {} 
     
     # 第一步：获取自适应ATR
     adaptive_atr_data = adaptive_atr_allocation(total_capital, varieties_data)
     
+    # 准备横截面动量计算所需的数据
+    cross_sectional_data = {}
+    for symbol, data in varieties_data.items():
+        if 'prices' in data and len(data['prices']) >= momentum_window:
+            # 创建DataFrame用于动量计算
+            prices_df = pd.DataFrame({
+                'close': data['prices'][-momentum_window:]
+            })
+            cross_sectional_data[symbol] = prices_df
+    
+    # 计算横截面动量信号
+    cross_sectional_signals = generate_cross_sectional_momentum_signal(cross_sectional_data, period=momentum_window)
+    
     for symbol, data in varieties_data.items(): 
-        # 1. ATR权重部分 (50%)
+        # 1. ATR权重部分 (100%)
         # 使用自适应ATR，如果没有则使用原始ATR
         if symbol in adaptive_atr_data:
             atr = adaptive_atr_data[symbol]['atr']
         else:
             atr = data['atr']
         
-        avg_atr = np.mean([(adaptive_atr_data.get(s, {'atr': d['atr']})['atr']) for s, d in varieties_data.items()])
+        # 防止ATR过小导致头寸过大，当ATR小于1时取1
+        if atr < 1:
+            atr = 1
+        
+        avg_atr = np.mean([(adaptive_atr_data.get(s, {'atr': max(d['atr'], 1)})['atr']) for s, d in varieties_data.items()])
         
         if atr > 0: 
             atr_weight = avg_atr / atr  # 波动率低 → 权重高 
         else: 
-            atr_weight = 1 
+            atr_weight = 1
         
-        # 2. 动量权重部分 (50%) 
+        # 2. 动量权重部分 - 综合三个动量指标
+        momentum_score = 1.0
+        
         if 'prices' in data and len(data['prices']) >= momentum_window: 
-            # 计算20日动量 
-            prices = data['prices'] 
-            momentum = (prices[-1] / prices[-momentum_window] - 1) * 100 
-            # 动量强的品种权重高 
-            momentum_weight = 1 + abs(momentum) * 0.1 
+            # 创建DataFrame用于动量计算
+            prices_df = pd.DataFrame({
+                'close': data['prices'][-momentum_window:]
+            })
+            
+            # a. 基本动量（时间序列动量）
+            momentum_df = calculate_momentum(prices_df, period=momentum_window)
+            basic_momentum = momentum_df['momentum'].iloc[-1]
+            
+            # b. 双重动量
+            dual_momentum_df = calculate_dual_momentum(prices_df, price_period=momentum_window, trend_period=momentum_window//2)
+            price_momentum = dual_momentum_df['price_momentum'].iloc[-1]
+            trend_momentum = dual_momentum_df['trend_momentum'].iloc[-1]
+            
+            # c. 横截面动量信号
+            cs_signal = cross_sectional_signals.get(symbol, 0)
+            
+            # 综合动量评分
+            # 基本动量贡献：0-30分
+            basic_score = max(0, min(30, (basic_momentum + 0.5) * 30))
+            
+            # 双重动量贡献：0-30分
+            dual_score = max(0, min(30, (price_momentum + 0.5) * 15 + (trend_momentum + 0.5) * 15))
+            
+            # 横截面动量信号贡献：0-40分
+            cs_score = max(0, min(40, (cs_signal + 1) * 20))
+            
+            # 总动量强度评分（0-100分）
+            total_momentum_strength = basic_score + dual_score + cs_score
+            
+            # 将动量强度转换为权重（1.0-2.0）
+            momentum_weight = 1.0 + (total_momentum_strength / 100.0)
         else: 
             # 如果没有价格数据，使用默认权重
-            momentum_weight = 1 
+            momentum_weight = 1.0 
         
-        # 3. 复合权重 
-        composite_weight = 0.3 * atr_weight + 0.7 * momentum_weight 
+        # 3. 复合权重 - 70% ATR权重，30%动量权重
+        composite_weight = 0.7 * atr_weight + 0.3 * momentum_weight 
         weights[symbol] = composite_weight 
     
     # 归一化 

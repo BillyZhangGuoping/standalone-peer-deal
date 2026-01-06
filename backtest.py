@@ -3,6 +3,8 @@ import numpy as np
 import os
 import glob
 from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import seaborn as sns
 from functions import (
     calculate_sharpe_ratio,
     calculate_max_drawdown,
@@ -13,13 +15,17 @@ from functions import (
     ensure_directory_exists
 )
 
+# 设置中文字体，避免中文显示问题
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
 # 配置参数
 TARGET_POSITION_DIR = 'random_forest_strategy/target_position'
 PRIMARY_DATA_DIR = 'History_Data/hot_daily_market_data'
 SECONDARY_DATA_DIR = 'History_Data/secondary_daily_market_data'
 OVER_DATA_DIR = 'History_Data/over_daily_market_data'
-VALIDATION_RESULT_DIR = 'validation_result'
-START_DATE = '2024-07-01'
+START_DATE = '2022-07-01'  # 回测开始日期
+END_DATE = '2023-12-15'    # 回测结束日期
 
 
 def load_all_target_positions(target_dir):
@@ -87,6 +93,11 @@ def load_all_history_data(primary_dir, secondary_dir):
 
 def backtest():
     """回测主函数"""
+    # 创建基于时间戳的结果目录
+    timestamp = datetime.now().strftime('%y%m%d_%H%M')
+    global VALIDATION_RESULT_DIR
+    VALIDATION_RESULT_DIR = os.path.join('validation_result', timestamp)
+    
     # 加载数据
     print("正在加载目标仓位数据...")
     target_positions = load_all_target_positions(TARGET_POSITION_DIR)
@@ -98,8 +109,15 @@ def backtest():
     # 确保验证结果目录存在
     ensure_directory_exists(VALIDATION_RESULT_DIR)
     
+    print(f"回测结果将保存到: {VALIDATION_RESULT_DIR}")
+    
     # 按日期排序
     sorted_dates = sorted(target_positions.keys())
+    
+    # 过滤掉START_DATE之前和END_DATE之后的日期
+    start_datetime = datetime.strptime(START_DATE, '%Y-%m-%d')
+    end_datetime = datetime.strptime(END_DATE, '%Y-%m-%d')
+    sorted_dates = [date for date in sorted_dates if start_datetime <= date <= end_datetime]
     
     # 初始化回测结果
     daily_returns = []
@@ -447,11 +465,258 @@ def backtest():
     trades_df.to_csv(trades_file, index=False)
     print(f"  每日交易明细已保存到: {trades_file}")
     
+    # 生成分析图表
+    generate_analysis_charts(actual_trading_days, equity_curve, daily_returns_series, daily_trades, metrics_df)
+    
+    # 分析品种绩效
+    analyze_variety_performance(daily_trades)
+    
     print("\n回测完成！")
 
 
 # 从position.py导入get_contract_multiplier函数
 from position import get_contract_multiplier
+
+
+def analyze_variety_performance(daily_trades):
+    """分析所有品种的累计收益和累计投入"""
+    print("\n正在分析品种绩效...")
+    
+    # 确保结果目录存在
+    ensure_directory_exists(VALIDATION_RESULT_DIR)
+    
+    if not daily_trades:
+        print("  没有交易数据，跳过品种绩效分析")
+        return
+    
+    # 转换为DataFrame
+    trades_df = pd.DataFrame(daily_trades)
+    
+    # 从合约代码中提取基础品种，如从lu2402.INE中提取lu
+    def get_base_symbol(symbol):
+        """从合约代码中提取基础品种，如a2409.DCE -> a"""
+        if '.' in symbol:
+            # 处理格式如lu2402.INE
+            contract = symbol.split('.')[0]
+            # 提取基础品种（字母部分）
+            base_symbol = ''.join([c for c in contract if not c.isdigit()])
+            return base_symbol.lower()
+        return symbol
+    
+    # 添加基础品种列
+    trades_df['base_symbol'] = trades_df['symbol'].apply(get_base_symbol)
+    
+    # 按基础品种分组，计算累计收益
+    variety_stats = trades_df.groupby('base_symbol').agg({
+        'total_pnl': 'sum'  # 累计收益
+    }).reset_index()
+    
+    # 计算累计投入
+    variety_stats['cumulative_investment'] = 0.0
+    
+    # 遍历每个基础品种，计算累计投入
+    for base_symbol in variety_stats['base_symbol'].tolist():
+        symbol_trades = trades_df[trades_df['base_symbol'] == base_symbol]
+        cumulative_investment = 0.0
+        
+        for _, trade in symbol_trades.iterrows():
+            # 计算每次开仓的投入资金
+            if trade['position_change'] > 0:  # 开仓
+                investment = trade['position_change'] * trade['trade_price'] * trade['contract_multiplier']
+                cumulative_investment += investment
+        
+        # 更新累计投入
+        variety_stats.loc[variety_stats['base_symbol'] == base_symbol, 'cumulative_investment'] = cumulative_investment
+    
+    # 计算累计收入和累计投入比
+    variety_stats['return_ratio'] = variety_stats['total_pnl'] / variety_stats['cumulative_investment']
+    
+    # 处理除以零的情况
+    variety_stats['return_ratio'] = variety_stats['return_ratio'].replace([np.inf, -np.inf], np.nan)
+    variety_stats = variety_stats.fillna(0)
+    
+    # 按累计收入和累计投入比排序
+    variety_stats = variety_stats.sort_values(by='return_ratio', ascending=False)
+    
+    # 保存到CSV文件
+    csv_file = os.path.join(VALIDATION_RESULT_DIR, 'variety_performance.csv')
+    variety_stats.to_csv(csv_file, index=False)
+    print(f"  品种绩效分析已保存到: {csv_file}")
+    
+    # 生成条形图
+    plt.figure(figsize=(15, 10))
+    # 只显示前20个品种
+    top_varieties = variety_stats.head(20)
+    plt.barh(top_varieties['base_symbol'], top_varieties['return_ratio'])
+    plt.title('品种累计收益投入比（前20名）')
+    plt.xlabel('累计收益 / 累计投入')
+    plt.ylabel('品种')
+    plt.grid(True)
+    # 添加数值标签
+    for i, v in enumerate(top_varieties['return_ratio']):
+        plt.text(v + 0.01, i, f'{v:.2f}', va='center')
+    plt.savefig(os.path.join(VALIDATION_RESULT_DIR, 'variety_return_ratio.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("  品种累计收益投入比条形图已保存")
+    
+    # 生成累计收益条形图
+    plt.figure(figsize=(15, 10))
+    top_profitable = variety_stats.nlargest(20, 'total_pnl')
+    plt.barh(top_profitable['base_symbol'], top_profitable['total_pnl'])
+    plt.title('品种累计收益（前20名）')
+    plt.xlabel('累计收益（元）')
+    plt.ylabel('品种')
+    plt.grid(True)
+    # 添加数值标签
+    for i, v in enumerate(top_profitable['total_pnl']):
+        plt.text(v + 1000, i, f'{v:,.0f}', va='center')
+    plt.savefig(os.path.join(VALIDATION_RESULT_DIR, 'variety_cumulative_pnl.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("  品种累计收益条形图已保存")
+    
+    return variety_stats
+
+
+def generate_analysis_charts(trading_days, equity_curve, daily_returns, daily_trades, metrics_df):
+    """生成回测分析图表"""
+    print("\n正在生成分析图表...")
+    
+    # 确保结果目录存在
+    ensure_directory_exists(VALIDATION_RESULT_DIR)
+    
+    # 1. 权益曲线图
+    plt.figure(figsize=(12, 6))
+    plt.plot(trading_days, equity_curve[1:], label='权益曲线')
+    plt.title('权益曲线图')
+    plt.xlabel('日期')
+    plt.ylabel('资金规模')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(os.path.join(VALIDATION_RESULT_DIR, 'equity_curve.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("  权益曲线图已保存")
+    
+    # 2. 每日收益率直方图
+    plt.figure(figsize=(12, 6))
+    sns.histplot(daily_returns, bins=50, kde=True)
+    plt.title('每日收益率分布直方图')
+    plt.xlabel('每日收益率')
+    plt.ylabel('频数')
+    plt.grid(True)
+    plt.savefig(os.path.join(VALIDATION_RESULT_DIR, 'daily_returns_hist.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("  每日收益率直方图已保存")
+    
+    # 3. 最大回撤图
+    plt.figure(figsize=(12, 6))
+    # 计算累计收益，确保与trading_days长度相同
+    cumulative_returns = [(equity - equity_curve[0]) / equity_curve[0] for equity in equity_curve[1:]]
+    plt.plot(trading_days, cumulative_returns, label='累计收益率')
+    plt.title('累计收益率和最大回撤')
+    plt.xlabel('日期')
+    plt.ylabel('累计收益率')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(os.path.join(VALIDATION_RESULT_DIR, 'cumulative_returns.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("  累计收益率图已保存")
+    
+    # 4. 回测指标对比图
+    # 转换指标为更易读的格式
+    plot_metrics = {
+        '总收益率': metrics_df['total_return'].values[0] * 100,
+        '年化收益率': metrics_df['annualized_return'].values[0] * 100,
+        '年化波动率': metrics_df['annualized_volatility'].values[0] * 100,
+        '夏普比率': metrics_df['sharpe_ratio'].values[0],
+        '最大回撤': metrics_df['max_drawdown'].values[0] * 100,
+        '索提诺比率': metrics_df['sortino_ratio'].values[0],
+        '胜率': metrics_df['win_rate'].values[0] * 100,
+        '盈利因子': metrics_df['profit_factor'].values[0]
+    }
+    
+    plt.figure(figsize=(12, 8))
+    metric_names = list(plot_metrics.keys())
+    metric_values = list(plot_metrics.values())
+    plt.barh(metric_names, metric_values)
+    plt.title('回测指标对比')
+    plt.xlabel('数值')
+    plt.grid(True)
+    # 添加数值标签
+    for i, v in enumerate(metric_values):
+        plt.text(v + 0.5, i, f'{v:.2f}', va='center')
+    plt.savefig(os.path.join(VALIDATION_RESULT_DIR, 'backtest_metrics.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("  回测指标对比图已保存")
+    
+    # 5. 月度收益率热力图
+    # 创建月度收益率数据
+    returns_df = pd.DataFrame({
+        'date': trading_days,
+        'return': daily_returns.values
+    })
+    returns_df.set_index('date', inplace=True)
+    monthly_returns = returns_df.resample('M').sum() * 100
+    monthly_returns['year'] = monthly_returns.index.year
+    monthly_returns['month'] = monthly_returns.index.month
+    
+    pivot_table = monthly_returns.pivot(index='year', columns='month', values='return')
+    plt.figure(figsize=(12, 6))
+    sns.heatmap(pivot_table, annot=True, cmap='RdYlGn', fmt='.2f', cbar_kws={'label': '月度收益率(%)'})
+    plt.title('月度收益率热力图')
+    plt.xlabel('月份')
+    plt.ylabel('年份')
+    plt.savefig(os.path.join(VALIDATION_RESULT_DIR, 'monthly_returns_heatmap.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("  月度收益率热力图已保存")
+    
+    # 6. 持仓分布饼图
+    if daily_trades:
+        # 获取最后一天的持仓
+        trades_df = pd.DataFrame(daily_trades)
+        last_date = trades_df['date'].max()
+        last_day_trades = trades_df[trades_df['date'] == last_date]
+        current_positions = last_day_trades[last_day_trades['current_position'] != 0]
+        
+        if not current_positions.empty:
+            # 按品种分组，计算总持仓
+            position_by_symbol = current_positions.groupby('symbol')['current_position'].sum().abs()
+            
+            plt.figure(figsize=(12, 12))
+            plt.pie(position_by_symbol.values, labels=position_by_symbol.index, autopct='%1.1f%%', startangle=90)
+            plt.title('最后一天持仓分布')
+            plt.savefig(os.path.join(VALIDATION_RESULT_DIR, 'position_distribution.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+            print("  持仓分布饼图已保存")
+    
+    # 7. 盈亏分布散点图
+    if daily_trades:
+        trades_df = pd.DataFrame(daily_trades)
+        plt.figure(figsize=(12, 6))
+        plt.scatter(range(len(trades_df)), trades_df['total_pnl'], alpha=0.6)
+        plt.title('每日盈亏分布')
+        plt.xlabel('交易序号')
+        plt.ylabel('盈亏金额')
+        plt.grid(True)
+        plt.savefig(os.path.join(VALIDATION_RESULT_DIR, 'pnl_distribution.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        print("  盈亏分布散点图已保存")
+    
+    # 8. 收益率滚动窗口分析
+    plt.figure(figsize=(12, 6))
+    rolling_mean = daily_returns.rolling(window=20).mean()
+    rolling_std = daily_returns.rolling(window=20).std()
+    plt.plot(trading_days, rolling_mean, label='20日滚动平均收益率')
+    plt.plot(trading_days, rolling_std, label='20日滚动波动率')
+    plt.title('收益率滚动窗口分析')
+    plt.xlabel('日期')
+    plt.ylabel('数值')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(os.path.join(VALIDATION_RESULT_DIR, 'rolling_analysis.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("  收益率滚动窗口分析图已保存")
+    
+    print("  所有分析图表已保存到", VALIDATION_RESULT_DIR)
 
 
 if __name__ == "__main__":

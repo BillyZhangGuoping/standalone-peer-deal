@@ -21,7 +21,7 @@ from utility.instrument_utils import get_contract_multiplier
 from position import calculate_portfolio_metrics
 from risk_allocation import calculate_atr_allocation, atr_momentum_composite_allocation
 from data_process import clean_data, normalize_data, standardize_data
-from calc_funcs import calculate_ma, calculate_ema, calculate_macd, calculate_rsi, calculate_bollinger_bands, calculate_atr, calculate_volume_weighted_average_price
+from calc_funcs import calculate_ma, calculate_macd, calculate_rsi, calculate_bollinger_bands, calculate_atr, calculate_volume_weighted_average_price
 from long_short_signals import generate_combined_signal, generate_ma_crossover_signal, generate_macd_signal, generate_rsi_signal, generate_bollinger_bands_signal
 from mom import generate_cross_sectional_momentum_signal, calculate_momentum, generate_momentum_signal
 
@@ -143,7 +143,7 @@ class ModelManager:
 
 # 配置参数
 CAPITAL = 10000000  # 总资金为一千万
-START_DATE = '2024-07-01'  # 开始日期
+START_DATE = '2022-07-01'  # 开始日期
 RISK_PER_TRADE = 0.02  # 每笔交易风险比例
 DATA_DIR = 'History_Data/hot_daily_market_data'  # 历史数据目录
 OUTPUT_DIR = 'random_forest_strategy/target_position'  # 输出目录
@@ -206,110 +206,33 @@ def preprocess_data(data):
     
     # 计算技术指标 - 使用与BaseModel一致的列名
     data['ma_5'] = calculate_ma(data, 5)
-    data['ma_10'] = calculate_ma(data, 10)
     data['ma_20'] = calculate_ma(data, 20)
     data['ma_60'] = calculate_ma(data, 60)
-    
-    # 计算指数移动平均线
-    data['ema_12'] = calculate_ema(data, 12)
-    data['ema_26'] = calculate_ema(data, 26)
-    data['ema_9'] = calculate_ema(data, 9)
     
     # 计算MACD
     data['macd'], data['macd_signal'], data['macd_histogram'] = calculate_macd(data)
     
-    # 计算RSI（多个周期）
-    data['rsi_7'] = calculate_rsi(data, 7)
-    data['rsi_14'] = calculate_rsi(data, 14)
-    data['rsi_21'] = calculate_rsi(data, 21)
+    # 计算RSI
+    data['rsi'] = calculate_rsi(data)
     
     # 计算布林带
     data['bb_upper'], data['bb_middle'], data['bb_lower'] = calculate_bollinger_bands(data)
-    # 布林带宽度和价格偏离程度
-    data['bb_width'] = (data['bb_upper'] - data['bb_lower']) / data['bb_middle']
-    data['bb_distance'] = (data['close'] - data['bb_middle']) / (data['bb_upper'] - data['bb_lower'])
     
-    # 计算ATR（多个周期）
-    data['atr_10'] = calculate_atr(data, 10)
-    data['atr_14'] = calculate_atr(data, 14)
-    data['atr_20'] = calculate_atr(data, 20)
+    # 计算ATR
+    data['atr'] = calculate_atr(data)
     
     # 计算成交量加权平均价格
     data['vwap'] = calculate_volume_weighted_average_price(data)
     
     # 计算动量指标
-    # 1. 经典动量指标
-    data['momentum_5'] = data['close'] / data['close'].shift(5) - 1
-    data['momentum_12'] = data['close'] / data['close'].shift(12) - 1
-    data['momentum_20'] = data['close'] / data['close'].shift(20) - 1
-    
-    # 2. 相对强弱指标
-    data['relative_strength'] = data['close'] / data['close'].shift(14) - 1
-    
-    # 3. 双重动量
-    data['price_momentum'] = data['close'] / data['close'].shift(12) - 1
-    data['trend_momentum'] = data['close'].rolling(window=6).mean() / data['close'].shift(6) - 1
-    
-    # 4. 绝对动量
-    data['absolute_momentum'] = data['close'] / data['close'].shift(12) - 1
-    
-    # 保持与base_model兼容的特征列
-    data['momentum'] = data['close'] / data['close'].shift(12) - 1  # 基础动量指标
-    data['rsi'] = data['rsi_14']  # 使用14日RSI作为基础RSI
+    data['momentum'] = calculate_ma(data, 12)  # 使用12日动量，与BaseModel一致
     
     # 生成信号列
-    # 1. 均线交叉信号
-    data['ma_golden_cross'] = 0
-    data['ma_death_cross'] = 0
-    data['ma_golden_cross'] = ((data['ma_5'] > data['ma_20']) & (data['ma_5'].shift(1) <= data['ma_20'].shift(1))).astype(int)
-    data['ma_death_cross'] = ((data['ma_5'] < data['ma_20']) & (data['ma_5'].shift(1) >= data['ma_20'].shift(1))).astype(int)
-    
-    # 2. MACD交叉信号
-    data['macd_golden_cross'] = 0
-    data['macd_death_cross'] = 0
-    data['macd_golden_cross'] = ((data['macd'] > data['macd_signal']) & (data['macd'].shift(1) <= data['macd_signal'].shift(1))).astype(int)
-    data['macd_death_cross'] = ((data['macd'] < data['macd_signal']) & (data['macd'].shift(1) >= data['macd_signal'].shift(1))).astype(int)
-    
-    # 3. RSI超买超卖信号
-    data['rsi_overbought'] = (data['rsi_14'] >= 70).astype(int)
-    data['rsi_oversold'] = (data['rsi_14'] <= 30).astype(int)
-    
-    # 4. 布林带突破信号
-    data['bb_buy_signal'] = ((data['close'] > data['bb_lower']) & (data['close'].shift(1) <= data['bb_lower'].shift(1))).astype(int)
-    data['bb_sell_signal'] = ((data['close'] < data['bb_upper']) & (data['close'].shift(1) >= data['bb_upper'].shift(1))).astype(int)
-    
-    # 5. 成交量信号
-    data['volume_ma'] = data['volume'].rolling(window=20).mean()
-    data['volume_surge'] = (data['volume'] > data['volume_ma'] * 1.5).astype(int)
-    data['price_volume_buy'] = ((data['volume_surge'] == 1) & (data['close'] > data['open'])).astype(int)
-    
-    # 生成base_model期望的信号列
-    # 1. 生成各个单信号
-    # 直接计算信号，避免使用复杂的布尔索引
-    # 均线信号：1=金叉，-1=死叉，0=持有
     data['signal_ma'] = 0
-    data.loc[data['ma_golden_cross'] == 1, 'signal_ma'] = 1
-    data.loc[data['ma_death_cross'] == 1, 'signal_ma'] = -1
-    
-    # MACD信号：1=金叉，-1=死叉，0=持有
     data['signal_macd'] = 0
-    data.loc[data['macd_golden_cross'] == 1, 'signal_macd'] = 1
-    data.loc[data['macd_death_cross'] == 1, 'signal_macd'] = -1
-    
-    # RSI信号：1=超卖，-1=超买，0=持有
     data['signal_rsi'] = 0
-    data.loc[data['rsi_oversold'] == 1, 'signal_rsi'] = 1
-    data.loc[data['rsi_overbought'] == 1, 'signal_rsi'] = -1
-    
-    # 布林带信号：1=突破下轨，-1=突破上轨，0=持有
     data['signal_bb'] = 0
-    data.loc[data['bb_buy_signal'] == 1, 'signal_bb'] = 1
-    data.loc[data['bb_sell_signal'] == 1, 'signal_bb'] = -1
-    
-    # 组合信号（等权重）
-    data['signal_combined'] = (data['signal_ma'] + data['signal_macd'] + data['signal_rsi'] + data['signal_bb']) / 4
-    # 转换为离散信号
-    data['signal_combined'] = np.sign(data['signal_combined'])
+    data['signal_combined'] = 0
     
     # 计算收益率
     data['return_1'] = data['close'].pct_change(1)
@@ -335,47 +258,9 @@ def preprocess_data(data):
 def prepare_features(data):
     """准备特征数据"""
     # 选择特征列
-    feature_columns = [
-        # 移动平均线相关
-        'ma_5', 'ma_10', 'ma_20', 'ma_60', 
-        'ema_12', 'ema_26', 'ema_9',
-        
-        # MACD相关
-        'macd', 'macd_signal', 'macd_histogram',
-        'macd_golden_cross', 'macd_death_cross',
-        
-        # RSI相关
-        'rsi_7', 'rsi_14', 'rsi_21',
-        'rsi_overbought', 'rsi_oversold',
-        
-        # 布林带相关
-        'bb_upper', 'bb_middle', 'bb_lower',
-        'bb_width', 'bb_distance',
-        'bb_buy_signal', 'bb_sell_signal',
-        
-        # ATR相关（多个周期）
-        'atr_10', 'atr_14', 'atr_20',
-        
-        # 成交量相关
-        'vwap', 'volume_ma', 'volume_surge', 'price_volume_buy',
-        
-        # 动量相关
-        'momentum_5', 'momentum_12', 'momentum_20',
-        'relative_strength', 'price_momentum', 'trend_momentum',
-        'absolute_momentum',
-        
-        # 均线交叉信号
-        'ma_golden_cross', 'ma_death_cross',
-        
-        # 价格和收益率相关
-        'return_1', 'return_5', 'return_10', 'return_20',
-        
-        # 波动率相关
-        'volatility_5', 'volatility_10', 'volatility_20',
-        
-        # 量价关系
-        'volume_change', 'price_volume_corr'
-    ]
+    feature_columns = ['ma5', 'ma10', 'ma20', 'ma60', 'macd', 'signal', 'hist', 'rsi', 'bb_upper', 'bb_middle', 'bb_lower',
+                      'atr', 'vwap', 'momentum_5', 'momentum_10', 'momentum_20', 'return_1', 'return_5', 'return_10', 'return_20',
+                      'volatility_5', 'volatility_10', 'volatility_20', 'volume_change', 'price_volume_corr']
     
     # 确保所有特征列存在
     available_features = [col for col in feature_columns if col in data.columns]

@@ -85,31 +85,6 @@ def generate_combined_signals(model_manager, all_data, features, date, confidenc
     """生成所有品种的组合信号"""
     predictions = {}
     
-    # 第一步：获取每个品种的预测结果
-    for base_symbol, data in all_data.items():
-        # 检查该品种在该日期是否有数据
-        if date not in data.index:
-            continue
-        
-        # 获取该品种在该日期之前的数据
-        past_data = data[data.index <= date]
-        
-        # 确保有足够数据
-        if len(past_data) < 360:
-            continue
-        
-        # 预测
-        pred = model_manager.predict(base_symbol, past_data, features)
-        if pred is not None:
-            predictions[base_symbol] = pred
-    
-    # 第二步：生成初始信号
-    initial_signals = generate_lstm_signals(predictions, confidence_threshold)
-    
-    # 第三步：过滤信号
-    filtered_signals = filter_signals(initial_signals)
-    
-    # 第四步：截面标准化
-    normalized_signals = normalize_signals(filtered_signals)
-    
-    return normalized_signals
+    # 直接返回空字典，因为我们已经在position_calculator.py中处理了信号生成
+    # 这个函数不再需要单独调用，而是在position_calculator.py中直接生成信号
+    return predictions

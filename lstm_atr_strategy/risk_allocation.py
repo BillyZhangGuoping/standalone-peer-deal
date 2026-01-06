@@ -4,16 +4,15 @@ import pandas as pd
 
 def calculate_dynamic_atr(data, windows=[14, 20, 50], weights=[0.5, 0.3, 0.2]):
     """计算动态ATR，使用多窗口加权平均"""
-    # 计算各窗口ATR
+    # 计算TR (真实波动幅度)
+    tr_high_low = data['high'] - data['low']
+    tr_high_prev_close = np.abs(data['high'] - data['close'].shift(1))
+    tr_low_prev_close = np.abs(data['low'] - data['close'].shift(1))
+    tr = pd.concat([tr_high_low, tr_high_prev_close, tr_low_prev_close], axis=1).max(axis=1)
+    
+    # 计算ATR
     atr_values = []
     for window in windows:
-        # 计算TR (真实波动幅度)
-        tr = np.max([
-            data['high'] - data['low'],
-            np.abs(data['high'] - data['close'].shift(1)),
-            np.abs(data['low'] - data['close'].shift(1))
-        ], axis=0)
-        
         # 计算ATR
         atr = tr.rolling(window=window).mean()
         atr_values.append(atr)
@@ -135,7 +134,7 @@ def calculate_portfolio_risk(positions, varieties_data, correlations=None):
     return total_risk
 
 
-def apply_position_constraints(positions, varieties_data, total_capital, max_lever_ratio=3.0, max_position_percent=0.05):
+def apply_position_constraints(positions, varieties_data, total_capital, max_lever_ratio=3.0, max_position_percent=0.05, max_open_interest_ratio=0.01):
     """应用头寸约束"""
     adjusted_positions = positions.copy()
     
@@ -164,5 +163,20 @@ def apply_position_constraints(positions, varieties_data, total_capital, max_lev
             # 缩减至上限
             max_position = int((total_capital * max_position_percent) / (data['current_price'] * data['contract_multiplier']))
             adjusted_positions[symbol] = np.sign(position) * max_position
+    
+    # 4. 检查流动性限制：持仓不超过open_interest的0.01
+    for symbol, position in adjusted_positions.items():
+        data = varieties_data[symbol]
+        
+        # 获取open_interest
+        # 假设open_interest在varieties_data中，如果没有则跳过
+        if 'open_interest' in data and data['open_interest'] > 0:
+            open_interest = data['open_interest']
+            # 计算最大允许持仓
+            max_allowed_position = int(open_interest * max_open_interest_ratio)
+            
+            # 如果当前持仓超过限制，缩减至上限
+            if abs(position) > max_allowed_position:
+                adjusted_positions[symbol] = np.sign(position) * max_allowed_position
     
     return adjusted_positions

@@ -96,7 +96,7 @@ def calculate_simple_atr(prices, window=20):
 def adaptive_atr_allocation(total_capital, varieties_data, volatility_regime_threshold=0.3): 
     """ 
     自适应ATR窗口的分配策略 
-    根据市场波动率状态调整ATR计算窗口，设定ATR最小值为1
+    根据市场波动率状态调整ATR计算窗口 
     """ 
     import numpy as np
     allocations = {} 
@@ -125,94 +125,114 @@ def adaptive_atr_allocation(total_capital, varieties_data, volatility_regime_thr
         # 计算自适应ATR 
         atr = calculate_simple_atr(prices, window=atr_window) 
         
-        # 设定ATR最小值为1
-        atr = max(atr, 1.0)
-        
-        # 直接使用ATR进行资金分配，不再乘以合约乘数
-        allocations[symbol] = {'atr': atr, 'original_atr': atr, 'atr_window': atr_window}
+        # 使用ATR进行资金分配
+        # 这里使用简化的ATR分配逻辑，与现有的ATR动量复合分配兼容
+        allocations[symbol] = {'atr': atr, 'atr_window': atr_window}
     
     return allocations
 
 def atr_momentum_composite_allocation(total_capital, varieties_data, momentum_window=20): 
     """ 
-    ATR动量复合分配策略
-    结合ATR风险分配和动量加权
-    
-    参数：
-    total_capital: 总资金
-    varieties_data: 各品种数据字典
-    momentum_window: 动量计算窗口
-    
-    返回：
-    allocation: 各品种分配资金
+    ATR权重 + 动量信号复合分配 
+    波动率低的品种 + 动量强的品种 = 高权重 
+    使用mom.py中的三个动量指标综合判断动量强度 
     """ 
     import numpy as np
+    import pandas as pd
+    import sys
+    import os
     
-    # 1. 获取自适应ATR
+    # 添加当前目录到Python路径，确保可以导入feature_calculator
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    
+    from feature_calculator import calculate_momentum_percentage as calculate_momentum, calculate_dual_momentum, generate_cross_sectional_momentum_signal
+    weights = {} 
+    
+    # 第一步：获取自适应ATR
     adaptive_atr_data = adaptive_atr_allocation(total_capital, varieties_data)
     
-    # 2. 计算各品种的动量
-    momentum_values = {}
+    # 准备横截面动量计算所需的数据
+    cross_sectional_data = {}
     for symbol, data in varieties_data.items():
-        prices = data['prices']
-        if len(prices) < momentum_window:
-            momentum_values[symbol] = 0
-        else:
-            # 计算动量：最近收盘价 / momentum_window前收盘价 - 1
-            momentum = (prices[-1] / prices[-momentum_window]) - 1
-            momentum_values[symbol] = momentum
+        if 'prices' in data and len(data['prices']) >= momentum_window:
+            # 创建DataFrame用于动量计算
+            prices_df = pd.DataFrame({
+                'close': data['prices'][-momentum_window:]
+            })
+            cross_sectional_data[symbol] = prices_df
     
-    # 3. 计算ATR权重
-    atr_weights = {}
-    all_atrs = []
+    # 计算横截面动量信号
+    cross_sectional_signals = generate_cross_sectional_momentum_signal(cross_sectional_data, period=momentum_window)
     
-    # 收集所有ATR值
-    for symbol, data in varieties_data.items():
-        if symbol in adaptive_atr_data:
-            all_atrs.append(adaptive_atr_data[symbol]['atr'])
-        else:
-            all_atrs.append(data['atr'])
-    
-    avg_atr = np.mean(all_atrs) if all_atrs else 1
-    
-    for symbol, data in varieties_data.items():
+    for symbol, data in varieties_data.items(): 
+        # 1. ATR权重部分 (100%)
         # 使用自适应ATR，如果没有则使用原始ATR
         if symbol in adaptive_atr_data:
             atr = adaptive_atr_data[symbol]['atr']
         else:
             atr = data['atr']
+
+        # 计算所有品种的原始ATR
+        all_atrs = [adaptive_atr_data.get(s, {'atr': d['atr']})['atr'] for s, d in varieties_data.items()]
+        avg_atr = np.mean(all_atrs)
         
-        if atr > 0:
-            # 波动率低 → 权重高
-            atr_weights[symbol] = avg_atr / atr
-        else:
-            atr_weights[symbol] = 1.0
+        # 新增ATR最小值约束：所有品种的ATR均值1/100 或者1，取最大值
+        atr_min = max(avg_atr / 200, 1.0)
+        atr = max(atr, atr_min)
+        
+        if atr > 0: 
+            atr_weight = avg_atr / atr  # 波动率低 → 权重高 
+        else: 
+            atr_weight = 1
+        
+        # 2. 动量权重部分 - 综合三个动量指标
+        momentum_score = 1.0
+        
+        if 'prices' in data and len(data['prices']) >= momentum_window: 
+            # 创建DataFrame用于动量计算
+            prices_df = pd.DataFrame({
+                'close': data['prices'][-momentum_window:]
+            })
+            
+            # a. 基本动量（时间序列动量）
+            momentum_df = calculate_momentum(prices_df, period=momentum_window)
+            basic_momentum = momentum_df['momentum'].iloc[-1]
+            
+            # b. 双重动量
+            dual_momentum_df = calculate_dual_momentum(prices_df, price_period=momentum_window, trend_period=momentum_window//2)
+            price_momentum = dual_momentum_df['price_momentum'].iloc[-1]
+            trend_momentum = dual_momentum_df['trend_momentum'].iloc[-1]
+            
+            # c. 横截面动量信号
+            cs_signal = cross_sectional_signals.get(symbol, 0)
+            
+            # 综合动量评分
+            # 基本动量贡献：0-30分
+            basic_score = max(0, min(30, (basic_momentum + 0.5) * 30))
+            
+            # 双重动量贡献：0-30分
+            dual_score = max(0, min(30, (price_momentum + 0.5) * 15 + (trend_momentum + 0.5) * 15))
+            
+            # 横截面动量信号贡献：0-40分
+            cs_score = max(0, min(40, (cs_signal + 1) * 20))
+            
+            # 总动量强度评分（0-100分）
+            total_momentum_strength = basic_score + dual_score + cs_score
+            
+            # 将动量强度转换为权重（1.0-2.0）
+            momentum_weight = 1.0 + (total_momentum_strength / 100.0)
+        else: 
+            # 如果没有价格数据，使用默认权重
+            momentum_weight = 1.0 
+        
+        # 3. 复合权重 - 30% ATR权重，70%动量权重
+        composite_weight = 0.3 * atr_weight + 0.7 * momentum_weight 
+        weights[symbol] = composite_weight 
     
-    # 4. 计算动量权重（标准化动量）
-    # 处理动量值，确保都是正数
-    momentum_abs = [abs(m) for m in momentum_values.values()]
-    avg_momentum_abs = np.mean(momentum_abs) if momentum_abs else 1
-    
-    momentum_weights = {}
-    for symbol, momentum in momentum_values.items():
-        # 动量越大，权重越高
-        momentum_weights[symbol] = abs(momentum) / avg_momentum_abs if avg_momentum_abs > 0 else 1.0
-    
-    # 5. 计算复合权重（ATR权重 * 0.5 + 动量权重 * 0.5）
-    composite_weights = {}
-    for symbol in varieties_data:
-        composite_weights[symbol] = atr_weights[symbol] * 0.5 + momentum_weights[symbol] * 0.5
-    
-    # 6. 归一化权重，分配资金
-    total_weight = sum(composite_weights.values())
-    allocation = {}
-    
-    if total_weight > 0:
-        for symbol, weight in composite_weights.items():
-            allocation[symbol] = (weight / total_weight) * total_capital
-    else:
-        # 如果总权重为0，等权分配
-        for symbol in varieties_data:
-            allocation[symbol] = total_capital / len(varieties_data)
+    # 归一化 
+    total_weight = sum(weights.values()) 
+    allocation = {} 
+    for symbol, weight in weights.items(): 
+        allocation[symbol] = (weight / total_weight) * total_capital 
     
     return allocation

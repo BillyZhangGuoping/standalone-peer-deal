@@ -67,8 +67,12 @@ class RandomForestTrainer:
             logger.error("数据准备失败，无法预测")
             return None
         
-        # 预测
-        return self.model.predict(X)
+        try:
+            # 预测
+            return self.model.predict(X)
+        except ValueError as e:
+            logger.error(f"预测失败: {e}")
+            return None
     
     def save_model(self, file_path):
         """保存模型

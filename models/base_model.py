@@ -142,13 +142,34 @@ class BaseModel(ABC):
         X: 特征数据
         y: 标签数据（如果是预测数据，可能为None）
         """
-        # 特征列
-        feature_columns = ['open', 'high', 'low', 'close', 'volume', 
-                          'ma_5', 'ma_20', 'ma_60', 
-                          'macd', 'macd_signal', 'macd_histogram', 
-                          'rsi', 'bb_upper', 'bb_middle', 'bb_lower', 
-                          'vwap', 'momentum',
-                          'signal_ma', 'signal_macd', 'signal_rsi', 'signal_bb', 'signal_combined']
+        # 特征列 - 加强趋势类特征，调整特征权重分布
+        # 核心价格数据
+        core_features = ['open', 'high', 'low', 'close', 'volume']
+        
+        # 趋势类特征（增加权重）
+        trend_features = ['ma_5', 'ma_20', 'ma_60',
+                         'days_above_ma5', 'days_above_ma20', 'days_above_ma60',
+                         'price_ma5_diff', 'price_ma20_diff', 'price_ma60_diff',
+                         'trend_strength', 'trend_strength_ma', 'trend_strength_ema',
+                         'price_slope_5', 'price_slope_20',
+                         'is_strong_up_trend', 'is_strong_down_trend', 'is_sideways',
+                         'adx', 'di_plus', 'di_minus']
+        
+        # 核心指标，移除RSI和布林带等超买超卖指标
+        core_oscillator_features = ['vwap', 'momentum']
+        
+        # 成交量相关特征
+        volume_features = ['volume_ma5', 'volume_ma20', 'volume_ma60',
+                         'volume_ema5', 'volume_ema20',
+                         'volume_ratio_5', 'volume_ratio_10',
+                         'volume_change', 'price_volume_corr']
+        
+        # 收益和波动率特征
+        return_volatility_features = ['return_5', 'return_10', 'return_20', 'return_60',
+                                     'volatility_10', 'volatility_20', 'volatility_60']
+        
+        # 组合所有特征，趋势类特征优先，移除超买超卖指标
+        feature_columns = core_features + trend_features + core_oscillator_features + volume_features + return_volatility_features
         
         # 检查是否为预测数据（只有一行数据，通常是最新数据）
         is_prediction_data = len(data) == 1
@@ -163,17 +184,19 @@ class BaseModel(ABC):
         
         # 只有在训练时才计算标签，预测时不计算
         if not is_prediction_data:
-            # 标签：1表示上涨，-1表示下跌
-            model_data['label'] = np.sign(model_data['close'].shift(-1) - model_data['close'])
+            # 标签：1表示上涨，-1表示下跌，预测5个交易日后趋势
+            model_data['label'] = np.sign(model_data['close'].shift(-5) - model_data['close'])
             
             # 再次移除NaN值，包括标签列
             model_data = model_data.dropna(subset=['label'])
             
-            if len(model_data) < 20:  # 数据量不足，无法训练模型
+            if len(model_data) < 360:  # 数据量不足360个，无法训练模型
                 return None, None
             
-            X = model_data[feature_columns]
-            y = model_data['label']
+            # 使用最近360天的数据，其中300天用于训练，60天用于验证
+            # 注意：这里只返回特征和标签，实际的训练验证划分由调用者处理
+            X = model_data[feature_columns].iloc[-360:-60]  # 最近360-60=300天用于训练
+            y = model_data['label'].iloc[-360:-60]  # 最近360-60=300天用于训练
         else:
             y = None
         

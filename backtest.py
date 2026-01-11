@@ -21,17 +21,52 @@ plt.rcParams['axes.unicode_minus'] = False
 
 # 配置参数
 TARGET_POSITION_DIR = 'random_forest_strategy/target_position'
+# 指定使用的目标头寸文件夹，留空则使用最新的
+SPECIFIC_TARGET_DIR = '260111_1928'  # 使用生成了320个文件的文件夹
 PRIMARY_DATA_DIR = 'History_Data/hot_daily_market_data'
 SECONDARY_DATA_DIR = 'History_Data/secondary_daily_market_data'
 OVER_DATA_DIR = 'History_Data/over_daily_market_data'
-START_DATE = '2022-07-01'  # 回测开始日期
-END_DATE = '2023-12-15'    # 回测结束日期
+START_DATE = '2024-01-01'  # 回测开始日期
+END_DATE = datetime.now().strftime('%Y-%m-%d')    # 回测结束日期（今天）
+
+
+
+def get_latest_target_position_dir(target_base_dir):
+    """获取最新的带时间戳的目标头寸文件夹，或使用指定的文件夹"""
+    if SPECIFIC_TARGET_DIR:
+        # 使用指定的文件夹
+        specific_dir = os.path.join(target_base_dir, SPECIFIC_TARGET_DIR)
+        if os.path.exists(specific_dir):
+            print(f"  使用指定的目标头寸文件夹: {specific_dir}")
+            return specific_dir
+        else:
+            print(f"  警告：指定的目标头寸文件夹不存在: {specific_dir}")
+    
+    if not os.path.exists(target_base_dir):
+        print(f"  警告：目标头寸目录不存在: {target_base_dir}")
+        return target_base_dir
+    
+    # 获取所有子目录
+    subdirs = [d for d in os.listdir(target_base_dir) if os.path.isdir(os.path.join(target_base_dir, d))]
+    
+    if not subdirs:
+        print(f"  警告：目标头寸目录中没有找到带时间戳的文件夹，将使用根目录")
+        return target_base_dir
+    
+    # 按名称排序，获取最新的文件夹
+    subdirs.sort(reverse=True)
+    latest_dir = os.path.join(target_base_dir, subdirs[0])
+    print(f"  使用最新的目标头寸文件夹: {latest_dir}")
+    return latest_dir
 
 
 def load_all_target_positions(target_dir):
     """加载所有目标仓位文件"""
+    # 获取最新的带时间戳的文件夹
+    actual_dir = get_latest_target_position_dir(target_dir)
+    
     # 使用正确的路径格式
-    pattern = os.path.join(target_dir, 'target_positions_*.csv')
+    pattern = os.path.join(actual_dir, 'target_positions_*.csv')
     files = glob.glob(pattern)
     # 按日期排序
     files.sort()
@@ -96,6 +131,7 @@ def backtest():
     # 创建基于时间戳的结果目录
     timestamp = datetime.now().strftime('%y%m%d_%H%M')
     global VALIDATION_RESULT_DIR
+    # 使用validation_result目录
     VALIDATION_RESULT_DIR = os.path.join('validation_result', timestamp)
     
     # 加载数据
@@ -124,7 +160,7 @@ def backtest():
     actual_trading_days = []  # 保存实际交易日期（目标头寸生成日的下一个交易日）
     processed_dates = []  # 保存实际处理的目标头寸生成日期
     current_positions = {}  # 保存当前持仓，键为symbol，值为持仓数量
-    initial_capital = 10000000
+    initial_capital = 4000000
     current_capital = initial_capital
     equity_curve = [initial_capital]
     
@@ -435,7 +471,7 @@ def backtest():
     })
     
     returns_file = os.path.join(VALIDATION_RESULT_DIR, 'daily_returns.csv')
-    returns_df.to_csv(returns_file, index=False)
+    returns_df.to_csv(returns_file, index=False, encoding='gbk')
     print(f"  每日收益已保存到: {returns_file}")
     
     # 保存回测指标
@@ -456,13 +492,45 @@ def backtest():
     
     metrics_df = pd.DataFrame([metrics])
     metrics_file = os.path.join(VALIDATION_RESULT_DIR, 'backtest_metrics.csv')
-    metrics_df.to_csv(metrics_file, index=False)
+    metrics_df.to_csv(metrics_file, index=False, encoding='gbk')
     print(f"  回测指标已保存到: {metrics_file}")
+    
+    # 更新回测摘要文件（在validation_result文件夹内）
+    backtest_summary_file = os.path.join('validation_result', 'backtest_summary.csv')
+    
+    # 创建回测摘要记录
+    summary_record = metrics.copy()
+    summary_record['test_completion_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    summary_record['回测历史数据开始时间'] = START_DATE
+    summary_record['历史数据结束时间'] = END_DATE
+    summary_record['所使用的策略名称'] = 'lstm_atr_strategy'
+    summary_record['result_directory'] = VALIDATION_RESULT_DIR
+    
+    # 转换为DataFrame
+    summary_df = pd.DataFrame([summary_record])
+    
+    # 调整列顺序，将基本信息放在前面
+    columns_order = ['test_completion_date', '回测历史数据开始时间', '历史数据结束时间', '所使用的策略名称', 'result_directory'] + [col for col in summary_df.columns if col not in ['test_completion_date', '回测历史数据开始时间', '历史数据结束时间', '所使用的策略名称', 'result_directory']]
+    summary_df = summary_df[columns_order]
+    
+    # 检查文件是否存在，不存在则创建，存在则追加
+    if os.path.exists(backtest_summary_file):
+        try:
+            existing_summary = pd.read_csv(backtest_summary_file, encoding='gbk')
+        except UnicodeDecodeError:
+            existing_summary = pd.read_csv(backtest_summary_file, encoding='utf-8')
+        updated_summary = pd.concat([existing_summary, summary_df], ignore_index=True)
+    else:
+        updated_summary = summary_df
+    
+    # 保存回测摘要
+    updated_summary.to_csv(backtest_summary_file, index=False, encoding='gbk')
+    print(f"  回测摘要已保存到: {backtest_summary_file}")
     
     # 保存每日交易明细
     trades_df = pd.DataFrame(daily_trades)
     trades_file = os.path.join(VALIDATION_RESULT_DIR, 'daily_trades.csv')
-    trades_df.to_csv(trades_file, index=False)
+    trades_df.to_csv(trades_file, index=False, encoding='gbk')
     print(f"  每日交易明细已保存到: {trades_file}")
     
     # 生成分析图表
@@ -540,7 +608,7 @@ def analyze_variety_performance(daily_trades):
     
     # 保存到CSV文件
     csv_file = os.path.join(VALIDATION_RESULT_DIR, 'variety_performance.csv')
-    variety_stats.to_csv(csv_file, index=False)
+    variety_stats.to_csv(csv_file, index=False, encoding='gbk')
     print(f"  品种绩效分析已保存到: {csv_file}")
     
     # 生成条形图

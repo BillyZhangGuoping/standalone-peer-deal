@@ -5,7 +5,7 @@ long_short_signals.pyd - 多空信号模块
 
 import pandas as pd
 import numpy as np
-from calc_funcs import calculate_ma, calculate_macd, calculate_rsi, calculate_bollinger_bands
+from utility.calc_funcs import calculate_ma, calculate_macd, calculate_rsi, calculate_bollinger_bands
 
 def generate_ma_crossover_signal(data, short_period=5, long_period=20):
     """生成均线交叉信号"""

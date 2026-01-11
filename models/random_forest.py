@@ -30,8 +30,12 @@ class RandomForestModel(BaseModel):
         返回：
         model: 训练好的随机森林模型
         """
-        # 创建并训练随机森林分类器
+        # 创建并训练随机森林分类器，增加树的数量和深度，提高模型复杂度
+        self.params['n_estimators'] = 200
+        self.params['max_depth'] = 15
         self.model = RandomForestClassifier(**self.params)
+        
+        # 训练模型
         self.model.fit(X_train, y_train)
         
         # 保存特征列
@@ -40,13 +44,13 @@ class RandomForestModel(BaseModel):
         return self.model
     
     def predict(self, X):
-        """预测结果
+        """预测结果，返回1或-1的二分类结果
         
         参数：
         X: 预测特征数据
         
         返回：
-        predictions: 预测结果
+        predictions: 预测结果，-1表示下跌趋势，1表示上涨趋势
         """
         if self.model is None:
             raise ValueError("模型尚未训练")
@@ -55,7 +59,9 @@ class RandomForestModel(BaseModel):
         if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X, columns=self.feature_columns)
         
+        # 直接获取分类预测结果
         predictions = self.model.predict(X)
+        
         self.predict_count += 1
         
         return predictions

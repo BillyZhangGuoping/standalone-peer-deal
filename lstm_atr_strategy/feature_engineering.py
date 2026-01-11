@@ -8,16 +8,16 @@ from sklearn.preprocessing import StandardScaler
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 从calc_funcs.py导入已有的技术指标计算函数
-from calc_funcs import (
+# 从utility/calc_funcs.py导入已有的技术指标计算函数
+from utility.calc_funcs import (
     calculate_ma, calculate_ema, calculate_macd, calculate_rsi, 
     calculate_bollinger_bands, calculate_atr, calculate_volume_weighted_average_price
 )
 
-# 从mom.py导入动量相关函数
-from mom import (
+# 从utility/mom.py导入动量相关函数
+from utility.mom import (
     calculate_momentum, calculate_relative_strength, 
-    calculate_dual_momentum, calculate_absolute_momentum
+    calculate_dual_momentum, generate_momentum_signal
 )
 
 def create_lstm_features(data, lookback=30):

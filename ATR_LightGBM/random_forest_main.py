@@ -17,13 +17,13 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from position_calculator import calculate_position_size
-from utility.instrument_utils import get_contract_multiplier
+from instrument_utils import get_contract_multiplier
 from position import calculate_portfolio_metrics
 from risk_allocation import calculate_atr_allocation, atr_momentum_composite_allocation
-from utility.data_process import clean_data, normalize_data, standardize_data
-from utility.calc_funcs import calculate_ma, calculate_macd, calculate_rsi, calculate_bollinger_bands, calculate_atr, calculate_volume_weighted_average_price
-from utility.long_short_signals import generate_combined_signal, generate_ma_crossover_signal, generate_macd_signal, generate_rsi_signal, generate_bollinger_bands_signal
-from utility.mom import generate_cross_sectional_momentum_signal, calculate_momentum, generate_momentum_signal
+
+
+# 使用本地特征计算函数
+from feature_calculator import calculate_ma, calculate_macd, calculate_rsi, calculate_bollinger_bands, calculate_atr, calculate_volume_weighted_average_price, calculate_momentum
 
 # 导入随机森林模型和训练器
 from models.random_forest import RandomForestModel
@@ -72,6 +72,8 @@ class ModelManager:
         """
         if self.model_type == 'random_forest':
             return RandomForestTrainer(self.params)
+        elif self.model_type == 'multi_time_period':
+            return RandomForestTrainer(self.params, model_class='multi_time_period')
         else:
             raise ValueError(f"不支持的模型类型：{self.model_type}")
     
@@ -143,7 +145,7 @@ class ModelManager:
 
 # 配置参数
 CAPITAL = 3000000  # 总资金为三百万
-START_DATE = '2024-01-01'  # 开始日期
+START_DATE = '2025-10-01'  # 开始日期
 RISK_PER_TRADE = 0.02  # 每笔交易风险比例
 DATA_DIR = 'History_Data/hot_daily_market_data'  # 历史数据目录
 OUTPUT_DIR = 'random_forest_strategy/target_position'  # 输出目录
@@ -200,16 +202,25 @@ def get_exchange(base_symbol):
 
 def preprocess_data(data):
     """预处理数据"""
-    # 检查记录条数是否足够生成指标（至少需要60天数据生成MA60）
-    if len(data) < 60:
+    # 检查记录条数是否足够生成指标（至少需要250天数据生成所有指标）
+    if len(data) < 250:
         logger.warning(f"数据不足，无法生成完整指标，仅有{len(data)}条记录")
     
     # 计算技术指标 - 使用与BaseModel一致的列名
     data['ma_5'] = calculate_ma(data, 5)
     data['ma_20'] = calculate_ma(data, 20)
     data['ma_60'] = calculate_ma(data, 60)
+    data['ma_120'] = calculate_ma(data, 120)  # 增加120日均线
+    data['ma_250'] = calculate_ma(data, 250)  # 增加250日均线
     
-    # 移除RSI和布林带等超买超卖指标，避免在长期趋势中发出错误信号
+    # 计算MACD
+    data['macd'], data['macd_signal'], data['macd_histogram'] = calculate_macd(data)
+    
+    # 计算RSI
+    data['rsi'] = calculate_rsi(data)
+    
+    # 计算布林带
+    data['bb_upper'], data['bb_middle'], data['bb_lower'] = calculate_bollinger_bands(data)
     
     # 计算ATR
     data['atr'] = calculate_atr(data)
@@ -218,129 +229,175 @@ def preprocess_data(data):
     data['vwap'] = calculate_volume_weighted_average_price(data)
     
     # 计算动量指标
-    data['momentum'] = calculate_ma(data, 12)  # 使用12日动量，与BaseModel一致
+    data['momentum_3'] = calculate_momentum(data, 3)  # 增加3日短期动量
+    data['momentum_5'] = calculate_momentum(data, 5)  # 增加5日短期动量
+    data['momentum_10'] = calculate_momentum(data, 10)  # 增加10日短期动量
+    data['momentum_12'] = calculate_momentum(data, 12)  # 12日动量
+    data['momentum_60'] = calculate_momentum(data, 60)  # 60日动量
+    
+    # 计算短期动量变化率
+    data['momentum_3_change'] = data['momentum_3'].pct_change(3)
+    data['momentum_5_change'] = data['momentum_5'].pct_change(5)
+    
+    # 计算短期动量与价格的相关性
+    data['momentum_price_corr_5'] = data['momentum_5'].rolling(window=5).corr(data['close'])
+    data['momentum_price_corr_10'] = data['momentum_10'].rolling(window=10).corr(data['close']) 
+    
+    # 计算短期动量突破指标
+    data['momentum_5_above_10'] = (data['momentum_5'] > data['momentum_10']).astype(int)
+    data['momentum_3_above_5'] = (data['momentum_3'] > data['momentum_5']).astype(int)
     
     # 计算趋势类特征
     # 价格在均线上方/下方的天数
     data['days_above_ma5'] = (data['close'] > data['ma_5']).rolling(window=10).sum()
     data['days_above_ma20'] = (data['close'] > data['ma_20']).rolling(window=20).sum()
     data['days_above_ma60'] = (data['close'] > data['ma_60']).rolling(window=60).sum()
+    data['days_above_ma120'] = (data['close'] > data['ma_120']).rolling(window=120).sum()  # 增加120日均线天数
+    data['days_above_ma250'] = (data['close'] > data['ma_250']).rolling(window=250).sum()  # 增加250日均线天数
     
     # 价格与均线的偏离程度
     data['price_ma5_diff'] = (data['close'] - data['ma_5']) / data['ma_5']
     data['price_ma20_diff'] = (data['close'] - data['ma_20']) / data['ma_20']
     data['price_ma60_diff'] = (data['close'] - data['ma_60']) / data['ma_60']
+    data['price_ma120_diff'] = (data['close'] - data['ma_120']) / data['ma_120']  # 增加120日均线偏离
+    data['price_ma250_diff'] = (data['close'] - data['ma_250']) / data['ma_250']  # 增加250日均线偏离
     
     # 趋势强度指标
     data['trend_strength'] = (data['ma_5'] - data['ma_60']) / data['ma_60']
+    data['long_term_trend_strength'] = (data['ma_60'] - data['ma_250']) / data['ma_250']  # 增加长期趋势强度
     
     # 计算收益率
     data['return_1'] = data['close'].pct_change(1)
+    data['return_3'] = data['close'].pct_change(3)  # 增加3日收益率
     data['return_5'] = data['close'].pct_change(5)
     data['return_10'] = data['close'].pct_change(10)
     data['return_20'] = data['close'].pct_change(20)
     data['return_60'] = data['close'].pct_change(60)
+    data['return_120'] = data['close'].pct_change(120)  # 增加120日收益率
     
     # 计算波动率
     data['volatility_5'] = data['return_1'].rolling(window=5).std() * np.sqrt(252)
     data['volatility_10'] = data['return_1'].rolling(window=10).std() * np.sqrt(252)
     data['volatility_20'] = data['return_1'].rolling(window=20).std() * np.sqrt(252)
     data['volatility_60'] = data['return_1'].rolling(window=60).std() * np.sqrt(252)
+    data['volatility_120'] = data['return_1'].rolling(window=120).std() * np.sqrt(252)  # 增加120日波动率
     
     # 计算量价关系
     data['volume_change'] = data['volume'].pct_change(1)
     data['price_volume_corr'] = data['close'].rolling(window=20).corr(data['volume'])
+    data['price_volume_corr_60'] = data['close'].rolling(window=60).corr(data['volume'])  # 增加60日量价相关
     
-    # 新增交易量相关指数指标
-    # 交易量移动平均线
-    data['volume_ma5'] = data['volume'].rolling(window=5).mean()
-    data['volume_ma20'] = data['volume'].rolling(window=20).mean()
-    data['volume_ma60'] = data['volume'].rolling(window=60).mean()
+    # 计算价格变化速率
+    data['price_change_rate'] = data['close'].diff(5) / data['close'].shift(5)  # 5日价格变化速率
     
-    # 交易量指数移动平均线（EMA）
-    data['volume_ema5'] = data['volume'].ewm(span=5, adjust=False).mean()
-    data['volume_ema20'] = data['volume'].ewm(span=20, adjust=False).mean()
+    # 计算相对强弱指标RSI与价格的背离
+    data['rsi_price_divergence'] = data['rsi'] - data['close'] / data['close'].rolling(window=20).mean()
     
-    # 交易量比率（当前成交量与N日平均成交量的比值）
-    data['volume_ratio_5'] = data['volume'] / data['volume_ma5']
-    data['volume_ratio_10'] = data['volume'] / data['volume'].rolling(window=10).mean()
+    # 计算均线排列特征
+    data['ma_5_above_20'] = (data['ma_5'] > data['ma_20']).astype(int)  # 5日均线上穿20日均线
+    data['ma_20_above_60'] = (data['ma_20'] > data['ma_60']).astype(int)  # 20日均线上穿60日均线
+    data['ma_60_above_120'] = (data['ma_60'] > data['ma_120']).astype(int)  # 60日均线上穿120日均线
     
-    # 交易量波动率
-    data['volume_volatility_5'] = data['volume_change'].rolling(window=5).std() * np.sqrt(252)
-    data['volume_volatility_20'] = data['volume_change'].rolling(window=20).std() * np.sqrt(252)
+    # 计算趋势方向的稳定性
+    data['trend_stability'] = data['trend_strength'].rolling(window=20).std()  # 趋势强度的稳定性
     
-    # 新增趋势跟踪指标
-    # 趋势强度指标 - 加强趋势特征权重
-    data['trend_strength_ma'] = (data['ma_5'] - data['ma_60']) / data['ma_60'] * 100
-    data['trend_strength_ema'] = (data['close'].ewm(span=20, adjust=False).mean() - data['close'].ewm(span=100, adjust=False).mean()) / data['close'].ewm(span=100, adjust=False).mean() * 100
+    # 添加趋势类特征
     
-    # 价格斜率 - 衡量价格变化速率
-    data['price_slope_5'] = data['close'].rolling(window=5).apply(lambda x: np.polyfit(range(5), x, 1)[0], raw=True)
-    data['price_slope_20'] = data['close'].rolling(window=20).apply(lambda x: np.polyfit(range(20), x, 1)[0], raw=True)
+    # 1. 趋势线突破特征
+    # 计算价格与不同周期均线的突破
+    data['price_break_above_ma5'] = (data['close'] > data['ma_5']) & (data['close'].shift(1) <= data['ma_5'].shift(1)).astype(int)
+    data['price_break_below_ma5'] = (data['close'] < data['ma_5']) & (data['close'].shift(1) >= data['ma_5'].shift(1)).astype(int)
+    data['price_break_above_ma20'] = (data['close'] > data['ma_20']) & (data['close'].shift(1) <= data['ma_20'].shift(1)).astype(int)
+    data['price_break_below_ma20'] = (data['close'] < data['ma_20']) & (data['close'].shift(1) >= data['ma_20'].shift(1)).astype(int)
+    data['price_break_above_ma60'] = (data['close'] > data['ma_60']) & (data['close'].shift(1) <= data['ma_60'].shift(1)).astype(int)
+    data['price_break_below_ma60'] = (data['close'] < data['ma_60']) & (data['close'].shift(1) >= data['ma_60'].shift(1)).astype(int)
     
-    # 趋势过滤器 - 检测明显趋势
-    data['is_strong_up_trend'] = ((data['ma_5'] > data['ma_20']) & (data['ma_20'] > data['ma_60']) & (data['close'] > data['ma_5']) & (data['trend_strength'] > 0.02)).astype(int)
-    data['is_strong_down_trend'] = ((data['ma_5'] < data['ma_20']) & (data['ma_20'] < data['ma_60']) & (data['close'] < data['ma_5']) & (data['trend_strength'] < -0.02)).astype(int)
-    data['is_sideways'] = ((data['ma_5'] - data['ma_60']).abs() / data['ma_60'] < 0.015).astype(int)
+    # 2. 布林带突破特征
+    data['price_break_above_bb'] = (data['close'] > data['bb_upper']).astype(int)
+    data['price_break_below_bb'] = (data['close'] < data['bb_lower']).astype(int)
     
-    # ADX指标（平均趋向指数）- 衡量趋势强度
-    # 计算真实波幅
-    data['tr'] = np.maximum(data['high'] - data['low'], 
-                          np.maximum(abs(data['high'] - data['close'].shift(1)), 
-                                   abs(data['low'] - data['close'].shift(1))))
-    # 计算上升趋向和下降趋向
-    data['dm_plus'] = np.where(data['high'] > data['high'].shift(1), data['high'] - data['high'].shift(1), 0)
-    data['dm_minus'] = np.where(data['low'] < data['low'].shift(1), data['low'].shift(1) - data['low'], 0)
-    # 计算14日平均真实波幅、上升趋向和下降趋向
-    period = 14
-    data['tr_smooth'] = data['tr'].ewm(span=period, adjust=False).mean()
-    data['dm_plus_smooth'] = data['dm_plus'].ewm(span=period, adjust=False).mean()
-    data['dm_minus_smooth'] = data['dm_minus'].ewm(span=period, adjust=False).mean()
-    # 计算趋向指标
-    data['di_plus'] = 100 * (data['dm_plus_smooth'] / data['tr_smooth'])
-    data['di_minus'] = 100 * (data['dm_minus_smooth'] / data['tr_smooth'])
-    # 计算DX和ADX
-    data['dx'] = 100 * (abs(data['di_plus'] - data['di_minus']) / (data['di_plus'] + data['di_minus']))
-    data['adx'] = data['dx'].ewm(span=period, adjust=False).mean()
+    # 3. 趋势强度特征
+    # 计算趋势斜率，添加值范围限制
+    def safe_slope(series, window):
+        """安全计算斜率，处理异常值"""
+        try:
+            slope = np.polyfit(range(window), series, 1)[0]
+            return slope
+        except:
+            return 0
     
-    # 新增趋势确认指标 - 增强强趋势识别
-    # 趋势一致性指标：短期、中期、长期均线方向一致
-    data['trend_consistency'] = ((np.sign(data['ma_5'] - data['ma_5'].shift(1)) == np.sign(data['ma_20'] - data['ma_20'].shift(1))) & \
-                                 (np.sign(data['ma_20'] - data['ma_20'].shift(1)) == np.sign(data['ma_60'] - data['ma_60'].shift(1)))).astype(int)
-    # 价格创新高指标：最近30天内的最高价
-    data['is_new_high'] = (data['close'] == data['close'].rolling(window=30).max()).astype(int)
-    # 增强版趋势强度：结合价格变化率和成交量
-    data['enhanced_trend_strength'] = (data['return_20'] * data['volume_ratio_10'] * (data['di_plus'] - data['di_minus']))
-    # 趋势持续时间：连续上涨/下跌的天数
-    def calculate_trend_duration(series):
-        duration = []
-        current_duration = 0
-        current_trend = 0
-        for i in range(len(series)):
-            if i == 0:
-                duration.append(0)
-                continue
-            if series.iloc[i] > series.iloc[i-1]:
-                if current_trend == 1:
-                    current_duration += 1
-                else:
-                    current_duration = 1
-                    current_trend = 1
-            elif series.iloc[i] < series.iloc[i-1]:
-                if current_trend == -1:
-                    current_duration += 1
-                else:
-                    current_duration = 1
-                    current_trend = -1
-            else:
-                current_duration = 0
-                current_trend = 0
-            duration.append(current_duration * current_trend)
-        return duration
-    data['trend_duration'] = calculate_trend_duration(data['close'])
+    data['ma5_slope'] = data['ma_5'].rolling(window=5).apply(lambda x: safe_slope(x, 5))
+    data['ma20_slope'] = data['ma_20'].rolling(window=10).apply(lambda x: safe_slope(x, 10))
+    data['ma60_slope'] = data['ma_60'].rolling(window=20).apply(lambda x: safe_slope(x, 20))
+    
+    # 限制斜率值范围
+    data['ma5_slope'] = data['ma5_slope'].clip(-100, 100)
+    data['ma20_slope'] = data['ma20_slope'].clip(-50, 50)
+    data['ma60_slope'] = data['ma60_slope'].clip(-20, 20)
+    
+    # 4. 价格形态特征
+    # 计算最高价与最低价的比值，添加除以零保护和值范围限制
+    data['high_low_ratio'] = (data['high'] / (data['low'].replace(0, 1e-8))).clip(1, 5)
+    # 计算收盘价相对于最高价/最低价的位置，添加除以零保护
+    price_range = data['high'] - data['low']
+    price_range = price_range.replace(0, 1e-8)
+    data['close_position'] = ((data['close'] - data['low']) / price_range).clip(0, 1)
+    # 计算价格波动范围
+    data['price_range'] = data['high'] - data['low']
+    # 计算范围比率，添加除以零保护和值范围限制
+    prev_close = data['close'].shift(1).replace(0, 1e-8)
+    data['range_ratio'] = (data['price_range'] / prev_close).clip(0, 1)
+    
+    # 5. 支撑位和阻力位相关特征
+    # 计算最近20天的最高价和最低价作为临时阻力位和支撑位
+    data['resistance_20d'] = data['high'].rolling(window=20).max()
+    data['support_20d'] = data['low'].rolling(window=20).min()
+    # 计算价格与支撑阻力位的距离，添加除以零保护和值范围限制
+    data['distance_to_resistance'] = ((data['resistance_20d'] - data['close']) / (data['close'].replace(0, 1e-8))).clip(0, 1)
+    data['distance_to_support'] = ((data['close'] - data['support_20d']) / (data['close'].replace(0, 1e-8))).clip(0, 1)
+    
+    # 6. 动量震荡指标
+    # 更安全的动量振荡器计算，添加除以零保护和值范围限制
+    momentum_12 = data['momentum_12'].replace(0, 1e-8)  # 替换0为很小的值
+    momentum_osc = (data['momentum_3'] - momentum_12) / momentum_12 * 100
+    data['momentum_oscillator'] = momentum_osc.clip(-200, 200)  # 限制值范围在-200到200之间
+    
+    # 7. 量价配合特征
+    # 上涨/下跌时的成交量变化
+    data['volume_on_up'] = data['volume'] * (data['close'] > data['open']).astype(int)
+    data['volume_on_down'] = data['volume'] * (data['close'] < data['open']).astype(int)
+    # 更安全的成交量比率计算，添加值范围限制
+    data['volume_ratio'] = (data['volume_on_up'] / (data['volume_on_down'] + 1e-8)).clip(0, 10)  # 限制在0到10之间
+    
+    # 8. 相对强弱指标的趋势
+    data['rsi_trend'] = data['rsi'].rolling(window=10).mean()
+    data['rsi_overbought'] = (data['rsi'] > 70).astype(int)
+    data['rsi_oversold'] = (data['rsi'] < 30).astype(int)
     
     # 处理缺失值
     data = data.dropna()
+    
+    # 全面清理数据，处理无限值和过大值
+    # 替换无限值为NaN
+    data = data.replace([np.inf, -np.inf], np.nan)
+    
+    # 使用中位数填充NaN值
+    for col in data.columns:
+        if data[col].dtype in ['float64', 'int64']:
+            data[col] = data[col].fillna(data[col].median())
+    
+    # 限制所有数值列的值范围
+    for col in data.columns:
+        if data[col].dtype in ['float64', 'int64']:
+            # 计算列的上下限（基于四分位数）
+            Q1 = data[col].quantile(0.01)
+            Q3 = data[col].quantile(0.99)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 3 * IQR
+            upper_bound = Q3 + 3 * IQR
+            
+            # 限制值范围
+            data[col] = data[col].clip(lower_bound, upper_bound)
     
     return data
 
@@ -396,11 +453,7 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
             # 检查是否需要训练模型
             if trainer.model is None or predict_counts[base_symbol] >= PREDICT_INTERVAL:
                 logger.info(f"训练{base_symbol}模型...")
-                # 确保至少有360个交易日数据用于训练
-                if len(processed_training_data) < 360:
-                    logger.warning(f"{base_symbol}训练数据不足360个交易日，当前仅有{len(processed_training_data)}个交易日，跳过训练")
-                    continue
-                # 使用训练数据训练模型（历史开始点到生成头寸前一天）
+                # 使用训练数据训练模型
                 model = model_manager.train_model(base_symbol, processed_training_data)
                 if model is None:
                     logger.warning(f"{base_symbol}模型训练失败，跳过该品种")
@@ -428,32 +481,37 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
                 signal = 0
             else:
                 signal = prediction[0]
+                
+                # 调试：打印信号
+                logger.debug(f"信号 - {base_symbol}: {signal}")
             
-            # 获取当前价格和主力合约代码
-            current_data = data.loc[date]
-            current_price = current_data['close']
-            contract_symbol = current_data['symbol']
-            
-            # 获取合约乘数和保证金率
-            contract_multiplier, margin_rate = get_contract_multiplier(contract_symbol)
-            
-            # 获取ATR值（从full_processed_data的最后一行）
-            atr = full_processed_data['atr'].iloc[-1] if 'atr' in full_processed_data.columns else 0
-            
-            # 获取价格历史数据（用于动量计算）
-            # 取最近30天的收盘价
-            prices = full_processed_data['close'].tail(30).tolist()
-            
-            # 收集品种数据用于ATR动量复合分配
-            varieties_data[base_symbol] = {
-                'current_price': current_price,
-                'atr': atr,
-                'contract_multiplier': contract_multiplier,
-                'margin_rate': margin_rate,
-                'contract_symbol': contract_symbol,
-                'signal': signal,  # 保留原始信号（趋势强度，-1.0到1.0）
-                'prices': prices
-            }
+            # 只处理有信号的品种
+            if signal == 1 or signal == -1:
+                # 获取当前价格和主力合约代码
+                current_data = data.loc[date]
+                current_price = current_data['close']
+                contract_symbol = current_data['symbol']
+                
+                # 获取合约乘数和保证金率
+                contract_multiplier, margin_rate = get_contract_multiplier(contract_symbol)
+                
+                # 获取ATR值（从full_processed_data的最后一行）
+                atr = full_processed_data['atr'].iloc[-1] if 'atr' in full_processed_data.columns else 0
+                
+                # 获取价格历史数据（用于动量计算）
+                # 取最近30天的收盘价
+                prices = full_processed_data['close'].tail(30).tolist()
+                
+                # 收集品种数据用于ATR动量复合分配
+                varieties_data[base_symbol] = {
+                    'current_price': current_price,
+                    'atr': atr,
+                    'contract_multiplier': contract_multiplier,
+                    'margin_rate': margin_rate,
+                    'contract_symbol': contract_symbol,
+                    'signal': signal,
+                    'prices': prices
+                }
                 
             # 更新预测次数
             predict_counts[base_symbol] += 1
@@ -461,13 +519,6 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
         # 第二步：基于ATR动量复合分配进行资金分配
         if varieties_data:
             logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行ATR动量复合分配...")
-            
-            # 提取趋势强度，用于调整ATR
-            trend_strengths = {}
-            for base_symbol, data in varieties_data.items():
-                # 信号现在是趋势强度（-1.0到1.0），直接使用
-                trend_strength = data['signal']
-                trend_strengths[base_symbol] = trend_strength
             
             # 使用ATR动量复合分配
             allocation = atr_momentum_composite_allocation(capital, varieties_data, momentum_window=20)
@@ -479,7 +530,7 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
                 contract_symbol = data['contract_symbol']
                 contract_multiplier = data['contract_multiplier']
                 margin_rate = data['margin_rate']
-                trend_strength = data['signal']  # 现在是趋势强度（-1.0到1.0）
+                signal = data['signal']
                 atr = data['atr']
                 
                 # 获取分配的资金
@@ -491,20 +542,16 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
                 price_multiplier = current_price * contract_multiplier * margin_rate
                 target_quantity = int(allocated_capital / price_multiplier)
                 
-                # 根据趋势强度调整方向和大小
-                # 方向由趋势强度的符号决定
-                direction = 1 if trend_strength > 0 else -1
-                # 大小可以考虑趋势强度的绝对值，趋势越强，仓位越大
-                # 这里使用基础手数乘以趋势强度的绝对值来调整仓位大小
-                target_quantity = int(target_quantity * abs(trend_strength) * direction)
+                # 根据信号调整方向
+                target_quantity = target_quantity * int(signal)
                 
                 # 调试信息：打印计算过程
-                logger.debug(f"品种 {base_symbol}: 分配资金={allocated_capital:.2f}, 当前价格={current_price}, 合约乘数={contract_multiplier}, 价格*乘数={price_multiplier:.2f}, 趋势强度={trend_strength:.4f}, 计算手数={target_quantity}")
+                logger.debug(f"品种 {base_symbol}: 分配资金={allocated_capital:.2f}, 当前价格={current_price}, 合约乘数={contract_multiplier}, 价格*乘数={price_multiplier:.2f}, 计算手数={target_quantity}")
                 
-                # 确保至少有1手（如果趋势强度足够强）
-                if abs(target_quantity) < 1 and abs(trend_strength) > 0.3:  # 趋势强度超过0.3才考虑开仓
+                # 确保至少有1手（如果有信号的话）
+                if abs(target_quantity) < 1 and signal != 0:
                     logger.debug(f"品种 {base_symbol}: 计算手数小于1，调整为1手")
-                    target_quantity = direction  # 至少1手
+                    target_quantity = int(signal)  # 至少1手
                 
                 # 确保手数不为0
                 if target_quantity == 0:
@@ -536,11 +583,9 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
                     'risk_amount': actual_risk_amount,  # 使用实际风险金额（保证金占用）
                     'margin_rate': margin_rate,
                     'total_capital': capital,
-                    'signal': trend_strength,  # 保存趋势强度，-1.0到1.0
-                    'trend_direction': direction,  # 保存趋势方向
-                    'trend_strength': abs(trend_strength),  # 保存趋势强度绝对值
+                    'signal': signal,
                     'model_type': 'random_forest_strategy',
-                    'market_value': position_value if direction == 1 else -position_value,
+                    'market_value': position_value if signal == 1 else -position_value,
                     'allocated_capital': allocated_capital,
                     'atr': atr
                 }
@@ -569,8 +614,8 @@ def main():
     all_data = load_all_data(DATA_DIR)
     logger.info(f"历史数据加载完成，共加载 {len(all_data)} 个品种")
     
-    # 创建模型管理器
-    model_manager = ModelManager(model_type='random_forest')
+    # 创建模型管理器，使用多时间周期模型
+    model_manager = ModelManager(model_type='multi_time_period')
     
     # 生成每日目标头寸
     generate_daily_target_positions(model_manager, all_data, START_DATE, CAPITAL)

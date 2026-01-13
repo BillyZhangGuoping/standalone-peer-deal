@@ -198,10 +198,10 @@ def atr_momentum_composite_allocation(total_capital, varieties_data, momentum_wi
         # 动量越大，权重越高
         momentum_weights[symbol] = abs(momentum) / avg_momentum_abs if avg_momentum_abs > 0 else 1.0
     
-    # 5. 计算复合权重（ATR权重 * 0.5 + 动量权重 * 0.5）
+    # 5. 计算复合权重（ATR权重 * 0.3 + 动量权重 * 0.7）
     composite_weights = {}
     for symbol in varieties_data:
-        composite_weights[symbol] = atr_weights[symbol] * 0.5 + momentum_weights[symbol] * 0.5
+        composite_weights[symbol] = atr_weights[symbol] * 0.3 + momentum_weights[symbol] * 0.7
     
     # 6. 归一化权重，分配资金
     total_weight = sum(composite_weights.values())
@@ -216,3 +216,98 @@ def atr_momentum_composite_allocation(total_capital, varieties_data, momentum_wi
             allocation[symbol] = total_capital / len(varieties_data)
     
     return allocation
+
+def enhanced_atr_allocation(total_capital, varieties_data, target_volatility=0.01, momentum_window=20):
+    """
+    增强型ATR分配策略
+    综合calculate_atr_allocation和atr_momentum_composite_allocation的优点
+    考虑合约乘数、当前价格和趋势强度
+    
+    参数：
+    total_capital: 总资金
+    varieties_data: 各品种数据字典
+    target_volatility: 目标单位风险
+    momentum_window: 动量计算窗口
+    
+    返回：
+    allocation: 各品种分配资金
+    risk_units: 各品种风险单位数
+    """
+    import numpy as np
+    
+    # 1. 获取自适应ATR
+    adaptive_atr_data = adaptive_atr_allocation(total_capital, varieties_data)
+    
+    # 2. 计算各品种的动量
+    momentum_values = {}
+    for symbol, data in varieties_data.items():
+        prices = data['prices']
+        if len(prices) < momentum_window:
+            momentum_values[symbol] = 0
+        else:
+            # 计算动量：最近收盘价 / momentum_window前收盘价 - 1
+            momentum = (prices[-1] / prices[-momentum_window]) - 1
+            momentum_values[symbol] = momentum
+    
+    # 3. 计算风险单位数
+    risk_units = {}
+    notional_values = {}
+    
+    for symbol, data in varieties_data.items():
+        # 获取当前价格、ATR、合约乘数和趋势强度
+        current_price = data['current_price']
+        contract_multiplier = data['contract_multiplier']
+        trend_strength = abs(data.get('trend_strength', 1))  # 默认趋势强度为1
+        
+        # 使用自适应ATR，如果没有则使用原始ATR
+        if symbol in adaptive_atr_data:
+            atr = adaptive_atr_data[symbol]['atr']
+        else:
+            atr = data['atr']
+        
+        # 设定ATR最小值为1
+        atr = max(atr, 1.0)
+        
+        # 计算每手ATR价值
+        atr_per_lot = atr * contract_multiplier
+        
+        if atr_per_lot > 0 and trend_strength > 0:
+            # 计算风险单位数：风险单位数 = (1 / 趋势强度) ÷ 每手ATR价值
+            risk_unit = (1 / trend_strength) / atr_per_lot
+            risk_units[symbol] = risk_unit
+            
+            # 计算名义市值：名义市值 = 风险单位数 × 当前价格 × 合约乘数
+            notional_value = risk_unit * current_price * contract_multiplier
+            notional_values[symbol] = notional_value
+        else:
+            risk_units[symbol] = 0
+            notional_values[symbol] = 0
+    
+    # 4. 计算动量权重（用于调整名义市值）
+    momentum_abs = [abs(m) for m in momentum_values.values()]
+    avg_momentum_abs = np.mean(momentum_abs) if momentum_abs else 1
+    
+    momentum_weights = {}
+    for symbol, momentum in momentum_values.items():
+        # 动量越大，权重越高
+        momentum_weights[symbol] = abs(momentum) / avg_momentum_abs if avg_momentum_abs > 0 else 1.0
+    
+    # 5. 应用动量权重调整名义市值
+    adjusted_notional_values = {}
+    for symbol, notional_value in notional_values.items():
+        adjusted_notional_values[symbol] = notional_value * momentum_weights[symbol]
+    
+    # 6. 归一化分配
+    total_adjusted_notional = sum(adjusted_notional_values.values())
+    allocation = {}
+    
+    if total_adjusted_notional > 0:
+        for symbol, notional_value in adjusted_notional_values.items():
+            allocation[symbol] = (notional_value / total_adjusted_notional) * total_capital
+    else:
+        # 默认等权分配
+        n_symbols = len(varieties_data)
+        for symbol in varieties_data:
+            allocation[symbol] = total_capital / n_symbols
+    
+    return allocation, risk_units

@@ -22,7 +22,7 @@ plt.rcParams['axes.unicode_minus'] = False
 # 配置参数
 TARGET_POSITION_DIR = 'random_forest_strategy/target_position'
 # 指定使用的目标头寸文件夹，留空则使用最新的
-SPECIFIC_TARGET_DIR = '260111_1928'  # 使用生成了320个文件的文件夹
+SPECIFIC_TARGET_DIR = '260113_1112'  # 使用用户指定的文件夹
 PRIMARY_DATA_DIR = 'History_Data/hot_daily_market_data'
 SECONDARY_DATA_DIR = 'History_Data/secondary_daily_market_data'
 OVER_DATA_DIR = 'History_Data/over_daily_market_data'

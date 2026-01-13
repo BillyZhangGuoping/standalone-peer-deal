@@ -19,15 +19,15 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from position_calculator import calculate_position_size
 from utility.instrument_utils import get_contract_multiplier
 from position import calculate_portfolio_metrics
-from risk_allocation import calculate_atr_allocation, atr_momentum_composite_allocation
+from risk_allocation import calculate_atr_allocation, atr_momentum_composite_allocation, enhanced_atr_allocation
 from utility.data_process import clean_data, normalize_data, standardize_data
 from utility.calc_funcs import calculate_ma, calculate_macd, calculate_rsi, calculate_bollinger_bands, calculate_atr, calculate_volume_weighted_average_price
 from utility.long_short_signals import generate_combined_signal, generate_ma_crossover_signal, generate_macd_signal, generate_rsi_signal, generate_bollinger_bands_signal
 from utility.mom import generate_cross_sectional_momentum_signal, calculate_momentum, generate_momentum_signal
 
 # 导入随机森林模型和训练器
-from models.random_forest import RandomForestModel
-from trade_model.random_forest_trainer import RandomForestTrainer
+from random_forest_strategy.models.random_forest import RandomForestModel
+from random_forest_strategy.trade_model.random_forest_trainer import RandomForestTrainer
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -458,19 +458,12 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
             # 更新预测次数
             predict_counts[base_symbol] += 1
         
-        # 第二步：基于ATR动量复合分配进行资金分配
+        # 第二步：基于ATR的等风险资金分配
         if varieties_data:
-            logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行ATR动量复合分配...")
+            logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于ATR的等风险资金分配...")
             
-            # 提取趋势强度，用于调整ATR
-            trend_strengths = {}
-            for base_symbol, data in varieties_data.items():
-                # 信号现在是趋势强度（-1.0到1.0），直接使用
-                trend_strength = data['signal']
-                trend_strengths[base_symbol] = trend_strength
-            
-            # 使用ATR动量复合分配
-            allocation = atr_momentum_composite_allocation(capital, varieties_data, momentum_window=20)
+            # 使用增强型ATR分配策略
+            allocation, _ = enhanced_atr_allocation(capital, varieties_data)
             
             # 第三步：为每个品种计算目标头寸
             for base_symbol, data in varieties_data.items():

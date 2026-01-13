@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 import logging
-from models.random_forest import RandomForestModel
+from ..models.random_forest import RandomForestModel
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

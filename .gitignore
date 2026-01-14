@@ -3,6 +3,8 @@
 *.pyd
 *.png
 *.txt
+*.json
+*.pkl
 *.xlsx
 *.zip
 *.rar

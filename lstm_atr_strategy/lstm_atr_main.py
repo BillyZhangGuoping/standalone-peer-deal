@@ -24,7 +24,7 @@ from utility.instrument_utils import get_contract_multiplier
 
 # 配置参数
 CAPITAL = 10000000  # 总资金为一千万
-START_DATE = '2024-07-01'  # 开始日期
+START_DATE = '2024-01-01'  # 开始日期
 RISK_PER_TRADE = 0.02  # 每笔交易风险比例
 DATA_DIR = 'History_Data/hot_daily_market_data'  # 历史数据目录
 OUTPUT_DIR = 'lstm_atr_strategy/target_position'  # 输出目录

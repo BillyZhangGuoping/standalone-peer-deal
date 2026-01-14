@@ -14,8 +14,11 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
     """生成每日目标头寸"""
     logger.info(f"开始生成每日目标头寸，起始日期: {start_date}")
     
-    # 确保输出目录存在
-    os.makedirs(output_dir, exist_ok=True)
+    # 创建带时间戳的子目录，格式：yyhhmm_HHMM
+    timestamp = datetime.now().strftime('%y%m%d_%H%M')
+    timestamp_output_dir = os.path.join(output_dir, timestamp)
+    os.makedirs(timestamp_output_dir, exist_ok=True)
+    logger.info(f"目标头寸将保存到时间戳目录: {timestamp_output_dir}")
     
     # 获取所有交易日期
     all_dates = []
@@ -32,6 +35,34 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
         'ma_5', 'ma_20', 'ma_50', 'ma_std_5', 'ma_std_20', 'ma_std_50'
     ]
     
+    # 预处理：一次性为每个品种生成所有特征数据
+    logger.info("开始预处理数据，一次性生成所有品种的特征...")
+    processed_data = {}
+    for base_symbol, data in all_data.items():
+        logger.info(f"预处理品种: {base_symbol}")
+        
+        # 获取该品种的所有数据
+        full_data = data.copy()
+        
+        # 检查数据量是否足够
+        if len(full_data) < 100:
+            continue
+        
+        # 1. 创建LSTM特征
+        lstm_featured_data = create_lstm_features(full_data.copy())
+        
+        # 2. 创建ATR特征
+        atr_featured_data = create_atr_features(lstm_featured_data.copy())
+        
+        # 3. 创建市场状态特征
+        final_data = create_market_state_features(atr_featured_data.copy())
+        
+        processed_data[base_symbol] = {
+            'original_data': data,
+            'final_data': final_data
+        }
+    logger.info("数据预处理完成")
+    
     # 遍历每个交易日
     for date in all_dates:
         logger.info(f"\n处理日期: {date.strftime('%Y-%m-%d')}")
@@ -40,49 +71,44 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
         daily_target_positions = []
         varieties_data = {}
         
-        # 第一步：预处理数据并生成特征
-        for base_symbol, data in all_data.items():
+        # 第一步：预处理数据并生成特征（使用已经预处理好的数据）
+        for base_symbol, data_dict in processed_data.items():
+            original_data = data_dict['original_data']
+            final_data = data_dict['final_data']
+            
             # 检查该品种在该日期是否有数据
-            if date not in data.index:
+            if date not in original_data.index:
                 continue
             
-            # 获取该品种在该日期之前的数据
-            past_data = data[data.index <= date]
+            # 检查该日期的数据是否在处理后的数据中
+            if date not in final_data.index:
+                continue
             
-            # 检查数据量是否足够：只需要满足训练所需的最少数据量
-            # 由于模型训练需要至少100条数据，这里保持100天的限制
+            # 检查数据量是否足够（仅保留该日期之前的数据）
+            past_data = final_data[final_data.index <= date]
             if len(past_data) < 100:
                 continue
-            
-            # 1. 创建LSTM特征
-            lstm_featured_data = create_lstm_features(past_data.copy())
-            
-            # 2. 创建ATR特征
-            atr_featured_data = create_atr_features(lstm_featured_data.copy())
-            
-            # 3. 创建市场状态特征
-            final_data = create_market_state_features(atr_featured_data.copy())
             
             # 检查是否需要重新训练模型
             if model_manager.should_retrain(base_symbol, current_date=date):
                 logger.info(f"训练{base_symbol}模型...")
-                model_manager.train_model(base_symbol, final_data, features)
+                model_manager.train_model(base_symbol, past_data, features)
             
             # 预测
-            pred = model_manager.predict(base_symbol, final_data, features)
+            pred = model_manager.predict(base_symbol, past_data, features)
             if pred is None:
                 continue
             
             # 获取当前数据
             current_data = final_data.loc[date]
             current_price = current_data['close']
-            contract_symbol = data.loc[date]['symbol']
+            contract_symbol = original_data.loc[date]['symbol']
             
             # 获取合约乘数和保证金率
             contract_multiplier, margin_rate = get_contract_multiplier(contract_symbol)
             
             # 计算动态ATR
-            dynamic_atr = calculate_dynamic_atr(final_data).loc[date]
+            dynamic_atr = calculate_dynamic_atr(past_data).loc[date]
             
             # 收集品种数据，包括当日open_interest
             varieties_data[base_symbol] = {
@@ -94,8 +120,8 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
                 'pred': pred,
                 'atr_14': current_data['atr_14'],
                 'atr_quantile': current_data['atr_14_quantile'],
-                'open_interest': data.loc[date]['open_interest'],
-                'final_data': final_data
+                'open_interest': original_data.loc[date]['open_interest'],
+                'final_data': past_data
             }
         
         # 第二步：生成信号并计算风险调整后的头寸
@@ -144,12 +170,14 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
                 
                 positions[symbol] = position
             
-            # 第四步：应用头寸约束
+            # 第四步：应用头寸约束，只保留杠杆3倍约束
             adjusted_positions = apply_position_constraints(
                 positions=positions,
                 varieties_data=varieties_data,
                 total_capital=capital,
-                max_open_interest_ratio=0.001  # 使用0.001作为持仓上限
+                max_lever_ratio=3.0,  # 保留3倍杠杆约束
+                max_position_percent=1.0,  # 单个品种头寸上限设为100%，相当于取消该约束
+                max_open_interest_ratio=1.0  # 持仓量比例上限设为100%，相当于取消该约束
             )
             
             # 第五步：生成最终头寸
@@ -197,7 +225,7 @@ def calculate_target_positions(model_manager, all_data, start_date, capital, out
             positions_df = positions_df[positions_df['position_size'] != 0]
             
             # 保存到文件
-            positions_file = os.path.join(output_dir, f'target_positions_{date.strftime("%Y%m%d")}.csv')
+            positions_file = os.path.join(timestamp_output_dir, f'target_positions_{date.strftime("%Y%m%d")}.csv')
             positions_df.to_csv(positions_file, index=False)
             logger.info(f"目标头寸已保存到 {positions_file}")
             logger.info(f"生成了 {len(positions_df)} 个品种的目标头寸")

@@ -66,6 +66,27 @@ class RandomForestModel(BaseModel):
         
         return predictions
     
+    def predict_proba(self, X):
+        """预测结果概率
+        
+        参数：
+        X: 预测特征数据
+        
+        返回：
+        probabilities: 预测结果概率，每个样本的类别概率
+        """
+        if self.model is None:
+            raise ValueError("模型尚未训练")
+        
+        # 确保X是DataFrame，保留特征名
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X, columns=self.feature_columns)
+        
+        # 获取概率预测结果
+        probabilities = self.model.predict_proba(X)
+        
+        return probabilities
+    
     def get_feature_importance(self):
         """获取特征重要性
         

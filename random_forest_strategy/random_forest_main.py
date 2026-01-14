@@ -102,6 +102,21 @@ class ModelManager:
         model = self.get_model(symbol)
         return model.predict(data)
     
+    def predict_with_proba(self, symbol, data):
+        """预测指定品种的结果和概率
+        
+        参数：
+        symbol: 品种代码
+        data: 包含特征数据
+        
+        返回：
+        tuple: (prediction, probability)
+            prediction: 预测结果
+            probability: 预测概率
+        """
+        model = self.get_model(symbol)
+        return model.predict_with_proba(data)
+    
     def should_retrain(self, symbol):
         """判断是否需要重新训练模型
         
@@ -200,6 +215,7 @@ def get_exchange(base_symbol):
 
 def preprocess_data(data):
     """预处理数据"""
+    import numpy as np
     # 检查记录条数是否足够生成指标（至少需要60天数据生成MA60）
     if len(data) < 60:
         logger.warning(f"数据不足，无法生成完整指标，仅有{len(data)}条记录")
@@ -311,33 +327,42 @@ def preprocess_data(data):
     data['is_new_high'] = (data['close'] == data['close'].rolling(window=30).max()).astype(int)
     # 增强版趋势强度：结合价格变化率和成交量
     data['enhanced_trend_strength'] = (data['return_20'] * data['volume_ratio_10'] * (data['di_plus'] - data['di_minus']))
-    # 趋势持续时间：连续上涨/下跌的天数
-    def calculate_trend_duration(series):
-        duration = []
-        current_duration = 0
-        current_trend = 0
-        for i in range(len(series)):
-            if i == 0:
-                duration.append(0)
-                continue
-            if series.iloc[i] > series.iloc[i-1]:
-                if current_trend == 1:
-                    current_duration += 1
-                else:
-                    current_duration = 1
-                    current_trend = 1
-            elif series.iloc[i] < series.iloc[i-1]:
-                if current_trend == -1:
-                    current_duration += 1
-                else:
-                    current_duration = 1
-                    current_trend = -1
+    # 趋势持续时间：连续上涨/下跌的天数 - 使用向量化操作优化
+    price_changes = np.sign(data['close'].diff())
+    trend_changes = price_changes.diff().fillna(0)
+    trend_duration = np.zeros(len(data))
+    current_duration = 0
+    current_trend = 0
+    
+    # 使用NumPy数组进行计算，比Pandas Series的apply方法更快
+    price_changes_np = price_changes.values
+    
+    for i in range(len(price_changes_np)):
+        if i == 0:
+            trend_duration[i] = 0
+            continue
+        
+        change = price_changes_np[i]
+        
+        if change == 1:
+            if current_trend == 1:
+                current_duration += 1
             else:
-                current_duration = 0
-                current_trend = 0
-            duration.append(current_duration * current_trend)
-        return duration
-    data['trend_duration'] = calculate_trend_duration(data['close'])
+                current_duration = 1
+                current_trend = 1
+        elif change == -1:
+            if current_trend == -1:
+                current_duration += 1
+            else:
+                current_duration = 1
+                current_trend = -1
+        else:
+            current_duration = 0
+            current_trend = 0
+        
+        trend_duration[i] = current_duration * current_trend
+    
+    data['trend_duration'] = trend_duration
     
     # 处理缺失值
     data = data.dropna()
@@ -366,6 +391,14 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
     # 初始化模型预测次数计数器
     predict_counts = {symbol: 0 for symbol in all_data.keys()}
     
+    # 预先为每个品种预处理一次完整的数据，避免重复计算
+    logger.info("开始预先预处理所有品种的数据...")
+    preprocessed_data = {}
+    for base_symbol, data in all_data.items():
+        logger.debug(f"预处理{base_symbol}的数据...")
+        preprocessed_data[base_symbol] = preprocess_data(data.copy())
+    logger.info("所有品种数据预处理完成")
+    
     # 遍历每个交易日
     for date in all_dates:
         logger.info(f"\n处理日期: {date.strftime('%Y-%m-%d')}")
@@ -381,13 +414,13 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
             if date not in data.index:
                 continue
             
-            # 获取该品种在该日期之前的数据（不包括当天）用于训练模型
-            training_data = data[data.index < date]
+            # 获取预处理后的数据
+            full_processed_data = preprocessed_data[base_symbol]
             
-            # 预处理训练数据
-            processed_training_data = preprocess_data(training_data.copy())
+            # 筛选出用于训练的数据（不包括当天）
+            training_data = full_processed_data[full_processed_data.index < date]
             
-            if processed_training_data.empty:
+            if training_data.empty:
                 continue
             
             # 获取模型
@@ -397,11 +430,11 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
             if trainer.model is None or predict_counts[base_symbol] >= PREDICT_INTERVAL:
                 logger.info(f"训练{base_symbol}模型...")
                 # 确保至少有360个交易日数据用于训练
-                if len(processed_training_data) < 360:
-                    logger.warning(f"{base_symbol}训练数据不足360个交易日，当前仅有{len(processed_training_data)}个交易日，跳过训练")
+                if len(training_data) < 360:
+                    logger.warning(f"{base_symbol}训练数据不足360个交易日，当前仅有{len(training_data)}个交易日，跳过训练")
                     continue
                 # 使用训练数据训练模型（历史开始点到生成头寸前一天）
-                model = model_manager.train_model(base_symbol, processed_training_data)
+                model = model_manager.train_model(base_symbol, training_data)
                 if model is None:
                     logger.warning(f"{base_symbol}模型训练失败，跳过该品种")
                     continue
@@ -412,22 +445,30 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
                 logger.warning(f"{base_symbol}模型尚未训练，跳过该品种")
                 continue
             
-            # 获取包含当天数据的完整数据，用于预测
-            full_data = data[data.index <= date]
-            full_processed_data = preprocess_data(full_data.copy())
+            # 筛选出用于预测的数据（包括当天）
+            predict_data = full_processed_data[full_processed_data.index <= date]
             
-            if full_processed_data.empty:
+            if predict_data.empty:
                 continue
             
             # 使用最新数据（当天）进行预测
-            latest_data = full_processed_data.iloc[-1:]
-            prediction = model_manager.predict(base_symbol, latest_data)
+            latest_data = predict_data.iloc[-1:]
+            prediction, probabilities = model_manager.predict_with_proba(base_symbol, latest_data)
             
             # 获取预测结果 - 处理None情况
-            if prediction is None:
+            if prediction is None or probabilities is None:
                 signal = 0
+                trend_strength = 0
             else:
                 signal = prediction[0]
+                # 使用预测概率作为趋势强度
+                # 提取正确类别的概率（信号为1则取类别1的概率，信号为-1则取类别-1的概率）
+                if signal == 1:
+                    trend_strength = probabilities[0][1] if probabilities.shape[1] > 1 else 0.5
+                elif signal == -1:
+                    trend_strength = probabilities[0][0] if probabilities.shape[1] > 1 else 0.5
+                else:
+                    trend_strength = 0
             
             # 获取当前价格和主力合约代码
             current_data = data.loc[date]
@@ -437,12 +478,12 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
             # 获取合约乘数和保证金率
             contract_multiplier, margin_rate = get_contract_multiplier(contract_symbol)
             
-            # 获取ATR值（从full_processed_data的最后一行）
-            atr = full_processed_data['atr'].iloc[-1] if 'atr' in full_processed_data.columns else 0
+            # 获取ATR值（从predict_data的最后一行）
+            atr = predict_data['atr'].iloc[-1] if 'atr' in predict_data.columns else 0
             
             # 获取价格历史数据（用于动量计算）
             # 取最近30天的收盘价
-            prices = full_processed_data['close'].tail(30).tolist()
+            prices = predict_data['close'].tail(30).tolist()
             
             # 收集品种数据用于ATR动量复合分配
             varieties_data[base_symbol] = {
@@ -451,7 +492,8 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
                 'contract_multiplier': contract_multiplier,
                 'margin_rate': margin_rate,
                 'contract_symbol': contract_symbol,
-                'signal': signal,  # 保留原始信号（趋势强度，-1.0到1.0）
+                'signal': signal,  # 保留原始信号（-1.0到1.0）
+                'trend_strength': trend_strength,  # 预测概率作为趋势强度
                 'prices': prices
             }
                 
@@ -529,9 +571,10 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
                     'risk_amount': actual_risk_amount,  # 使用实际风险金额（保证金占用）
                     'margin_rate': margin_rate,
                     'total_capital': capital,
-                    'signal': trend_strength,  # 保存趋势强度，-1.0到1.0
+                    'signal': data['signal'],  # 保存原始信号，-1.0到1.0
                     'trend_direction': direction,  # 保存趋势方向
-                    'trend_strength': abs(trend_strength),  # 保存趋势强度绝对值
+                    'trend_strength': data['trend_strength'],  # 保存趋势强度（预测概率）
+                    'trend_strength_reference': data['trend_strength'],  # 趋势强度参考列
                     'model_type': 'random_forest_strategy',
                     'market_value': position_value if direction == 1 else -position_value,
                     'allocated_capital': allocated_capital,

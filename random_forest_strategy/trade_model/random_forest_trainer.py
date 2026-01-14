@@ -74,6 +74,38 @@ class RandomForestTrainer:
             logger.error(f"预测失败: {e}")
             return None
     
+    def predict_with_proba(self, data):
+        """预测结果和概率
+        
+        参数：
+        data: 预测数据
+        
+        返回：
+        tuple: (prediction, probability)
+            prediction: 预测结果
+            probability: 预测概率
+        """
+        if self.model is None:
+            logger.error("模型尚未训练，无法预测")
+            return None, None
+        
+        # 准备模型数据
+        X, _ = self.model.prepare_model_data(data)
+        
+        if X is None:
+            logger.error("数据准备失败，无法预测")
+            return None, None
+        
+        try:
+            # 预测类别
+            prediction = self.model.predict(X)
+            # 预测概率
+            probabilities = self.model.predict_proba(X)
+            return prediction, probabilities
+        except ValueError as e:
+            logger.error(f"预测失败: {e}")
+            return None, None
+    
     def save_model(self, file_path):
         """保存模型
         

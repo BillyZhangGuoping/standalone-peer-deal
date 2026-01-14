@@ -38,15 +38,8 @@ def generate_lstm_signals(predictions, confidence_threshold=0.6):
 
 
 def filter_signals(signals, min_signal_strength=0.2):
-    """过滤信号，只保留强度足够的信号"""
-    filtered_signals = {}
-    
-    for symbol, signal_info in signals.items():
-        signal = signal_info['signal']
-        if abs(signal) >= min_signal_strength:
-            filtered_signals[symbol] = signal_info
-    
-    return filtered_signals
+    """取消过滤信号，返回所有信号"""
+    return signals
 
 
 def normalize_signals(signals):

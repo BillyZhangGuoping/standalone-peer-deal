@@ -26,21 +26,11 @@ def calculate_dynamic_atr(data, windows=[14, 20, 50], weights=[0.5, 0.3, 0.2]):
 def calculate_risk_adjusted_position(capital, signal, atr, current_price, contract_multiplier, margin_rate, 
                                     risk_per_trade=0.02, pred_volatility=None, actual_volatility=None):
     """计算风险调整后的头寸规模"""
-    # 核心公式：头寸规模 = (总资金 * 单笔风险比例) / (ATR * 合约乘数)
-    base_position = (capital * risk_per_trade) / (atr * contract_multiplier)
-    
-    # 根据预测波动率与实际波动率的差异调整风险比例
-    if pred_volatility is not None and actual_volatility is not None and actual_volatility > 0:
-        # 波动率调整因子：如果预测波动率高于实际波动率，增加风险暴露，反之减少
-        volatility_factor = min(max(pred_volatility / actual_volatility, 0.5), 2.0)
-    else:
-        volatility_factor = 1.0
-    
-    # 应用波动率调整
-    adjusted_position = base_position * volatility_factor
+    # 核心公式：头寸规模 = (总资金 * 单笔风险比例) * (1 + 信号强度) / (ATR * 合约乘数)
+    base_position = (capital * risk_per_trade) * (1 + abs(signal)) / (atr * contract_multiplier)
     
     # 根据信号方向和强度调整
-    final_position = adjusted_position * signal
+    final_position = base_position * signal
     
     # 转换为整数手数
     final_position = int(round(final_position))
@@ -135,7 +125,7 @@ def calculate_portfolio_risk(positions, varieties_data, correlations=None):
 
 
 def apply_position_constraints(positions, varieties_data, total_capital, max_lever_ratio=3.0, max_position_percent=0.05, max_open_interest_ratio=0.01):
-    """应用头寸约束"""
+    """应用头寸约束，只保留杠杆3倍约束"""
     adjusted_positions = positions.copy()
     
     # 1. 计算当前杠杆率
@@ -152,31 +142,5 @@ def apply_position_constraints(positions, varieties_data, total_capital, max_lev
         reduction_factor = max_lever_ratio / current_lever
         for symbol in adjusted_positions:
             adjusted_positions[symbol] = int(adjusted_positions[symbol] * reduction_factor)
-    
-    # 3. 检查单个品种头寸上限（相对于总资金）
-    for symbol, position in adjusted_positions.items():
-        data = varieties_data[symbol]
-        position_value = abs(position) * data['current_price'] * data['contract_multiplier']
-        position_percent = position_value / total_capital
-        
-        if position_percent > max_position_percent:
-            # 缩减至上限
-            max_position = int((total_capital * max_position_percent) / (data['current_price'] * data['contract_multiplier']))
-            adjusted_positions[symbol] = np.sign(position) * max_position
-    
-    # 4. 检查流动性限制：持仓不超过open_interest的0.01
-    for symbol, position in adjusted_positions.items():
-        data = varieties_data[symbol]
-        
-        # 获取open_interest
-        # 假设open_interest在varieties_data中，如果没有则跳过
-        if 'open_interest' in data and data['open_interest'] > 0:
-            open_interest = data['open_interest']
-            # 计算最大允许持仓
-            max_allowed_position = int(open_interest * max_open_interest_ratio)
-            
-            # 如果当前持仓超过限制，缩减至上限
-            if abs(position) > max_allowed_position:
-                adjusted_positions[symbol] = np.sign(position) * max_allowed_position
     
     return adjusted_positions

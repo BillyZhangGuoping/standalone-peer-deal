@@ -17,11 +17,24 @@ from utility.calc_funcs import (
 # 从utility/mom.py导入动量相关函数
 from utility.mom import (
     calculate_momentum, calculate_relative_strength, 
-    calculate_dual_momentum, generate_momentum_signal
+    calculate_dual_momentum, calculate_absolute_momentum, generate_momentum_signal
 )
+
+# 特征缓存，避免重复计算
+_feature_cache = {
+    'lstm_features': {},
+    'atr_features': {},
+    'market_state_features': {}
+}
 
 def create_lstm_features(data, lookback=30):
     """创建LSTM路径特征"""
+    # 使用数据的索引范围和lookback参数作为缓存键
+    cache_key = (data.index.min(), data.index.max(), lookback)
+    
+    if cache_key in _feature_cache['lstm_features']:
+        return _feature_cache['lstm_features'][cache_key].copy()
+    
     df = data.copy()
     
     # 时序特征
@@ -67,10 +80,19 @@ def create_lstm_features(data, lookback=30):
     df['volume_ma_20'] = df['volume'].rolling(window=20).mean()
     df['volume_ratio'] = df['volume'] / df['volume_ma_20']
     
+    # 缓存结果
+    _feature_cache['lstm_features'][cache_key] = df.copy()
+    
     return df
 
 def create_atr_features(data):
     """创建ATR路径特征"""
+    # 使用数据的索引范围作为缓存键
+    cache_key = (data.index.min(), data.index.max())
+    
+    if cache_key in _feature_cache['atr_features']:
+        return _feature_cache['atr_features'][cache_key].copy()
+    
     df = data.copy()
     
     # 核心波动率特征：不同窗口的ATR值
@@ -82,21 +104,27 @@ def create_atr_features(data):
     # 波动率结构：短期ATR与长期ATR的比值
     df['atr_ratio'] = df['atr_14'] / df['atr_50']
     
-    # 极值波动：当前ATR在历史中的分位数
-    def calculate_quantile(series):
-        return series.rank(pct=True).iloc[-1]
-    
-    df['atr_14_quantile'] = df['atr_14'].rolling(window=252).apply(calculate_quantile, raw=False)
-    df['atr_close_ratio_quantile'] = df['atr_close_ratio_14'].rolling(window=252).apply(calculate_quantile, raw=False)
+    # 极值波动：当前ATR在历史中的分位数（优化为使用rolling.rank(pct=True)）
+    df['atr_14_quantile'] = df['atr_14'].rolling(window=252).rank(pct=True)
+    df['atr_close_ratio_quantile'] = df['atr_close_ratio_14'].rolling(window=252).rank(pct=True)
     
     # 添加ATR的移动平均线
     df['atr_ma_14'] = df['atr_14'].rolling(window=14).mean()
     df['atr_ema_14'] = df['atr_14'].ewm(span=14, adjust=False).mean()
     
+    # 缓存结果
+    _feature_cache['atr_features'][cache_key] = df.copy()
+    
     return df
 
 def create_market_state_features(data, n_clusters=3):
     """创建市场状态特征"""
+    # 使用数据的索引范围和n_clusters作为缓存键
+    cache_key = (data.index.min(), data.index.max(), n_clusters)
+    
+    if cache_key in _feature_cache['market_state_features']:
+        return _feature_cache['market_state_features'][cache_key].copy()
+    
     df = data.copy()
     
     # 计算状态特征
@@ -115,11 +143,16 @@ def create_market_state_features(data, n_clusters=3):
     
     # 聚类
     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    df['market_state'] = kmeans.fit_predict(scaled_features)
+    market_state = kmeans.fit_predict(scaled_features)
+    
+    df['market_state'] = market_state
     
     # 将状态转换为独热编码
     for i in range(n_clusters):
         df[f'state_{i}'] = (df['market_state'] == i).astype(int)
+    
+    # 缓存结果
+    _feature_cache['market_state_features'][cache_key] = df.copy()
     
     return df
 

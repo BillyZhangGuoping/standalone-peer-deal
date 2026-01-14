@@ -22,11 +22,11 @@ plt.rcParams['axes.unicode_minus'] = False
 # 配置参数
 TARGET_POSITION_DIR = 'random_forest_strategy/target_position'
 # 指定使用的目标头寸文件夹，留空则使用最新的
-SPECIFIC_TARGET_DIR = '260114_1056'  # 使用用户指定的文件夹
+SPECIFIC_TARGET_DIR = '260114_1521'  # 使用用户指定的文件夹
 PRIMARY_DATA_DIR = 'History_Data/hot_daily_market_data'
 SECONDARY_DATA_DIR = 'History_Data/secondary_daily_market_data'
 OVER_DATA_DIR = 'History_Data/over_daily_market_data'
-START_DATE = '2024-01-01'  # 回测开始日期
+START_DATE = '2023-01-01'  # 回测开始日期
 END_DATE = datetime.now().strftime('%Y-%m-%d')    # 回测结束日期（今天）
 
 

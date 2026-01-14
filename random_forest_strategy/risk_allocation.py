@@ -251,7 +251,7 @@ def enhanced_atr_allocation(total_capital, varieties_data, target_volatility=0.0
         atr_per_lot = atr * contract_multiplier
         
         if atr_per_lot > 0 and trend_strength > 0:
-            # 计算风险单位数：风险单位数 = (1 + 趋势强度/2) ÷ 每手ATR价值
+            # 计算风险单位数：风险单位数 = (1 + 趋势强度) ÷ 每手ATR价值
             risk_unit = (1 + trend_strength) / atr_per_lot
             risk_units[symbol] = risk_unit
             

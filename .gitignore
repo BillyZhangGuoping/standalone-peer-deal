@@ -5,6 +5,8 @@
 *.txt
 *.json
 *.pkl
+*.keras
+*.pth
 *.xlsx
 *.zip
 *.rar
@@ -36,6 +38,7 @@ History_Data/
 hot_daily_market_data/
 random_forest_strategy/target_position/
 validation_result/
+MultiInstrumentLSTM-Trading-System/models/
 *.pyc
 *.pyo
 *.egg-info/

@@ -158,7 +158,7 @@ class ModelManager:
 
 # 配置参数
 CAPITAL = 3000000  # 总资金为三百万
-START_DATE = '2024-01-01'  # 开始日期
+START_DATE = '2023-01-02'  # 开始日期
 RISK_PER_TRADE = 0.02  # 每笔交易风险比例
 DATA_DIR = 'History_Data/hot_daily_market_data'  # 历史数据目录
 OUTPUT_DIR = 'random_forest_strategy/target_position'  # 输出目录

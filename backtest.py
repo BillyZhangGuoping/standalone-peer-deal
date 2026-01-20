@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import os
 import glob
+import argparse
+import json
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -19,15 +21,40 @@ from functions import (
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
-# 配置参数
-TARGET_POSITION_DIR = 'random_forest_strategy/target_position'
-# 指定使用的目标头寸文件夹，留空则使用最新的
-SPECIFIC_TARGET_DIR = '260114_1521'  # 使用用户指定的文件夹
-PRIMARY_DATA_DIR = 'History_Data/hot_daily_market_data'
-SECONDARY_DATA_DIR = 'History_Data/secondary_daily_market_data'
-OVER_DATA_DIR = 'History_Data/over_daily_market_data'
-START_DATE = '2023-01-01'  # 回测开始日期
-END_DATE = datetime.now().strftime('%Y-%m-%d')    # 回测结束日期（今天）
+# 解析命令行参数
+parser = argparse.ArgumentParser(description='回测主函数')
+parser.add_argument('--config', type=str, help='配置文件路径')
+args = parser.parse_args()
+
+# 加载配置文件
+if args.config and os.path.exists(args.config):
+    with open(args.config, 'r') as f:
+        config = json.load(f)
+    
+    # 从配置文件中获取参数
+    TARGET_POSITION_DIR = config.get('TARGET_POSITION_DIR', 'random_forest_strategy/target_position')
+    SPECIFIC_TARGET_DIR = config.get('SPECIFIC_TARGET_DIR', '')
+    PRIMARY_DATA_DIR = config.get('PRIMARY_DATA_DIR', 'History_Data/hot_daily_market_data')
+    SECONDARY_DATA_DIR = config.get('SECONDARY_DATA_DIR', 'History_Data/secondary_daily_market_data')
+    OVER_DATA_DIR = config.get('OVER_DATA_DIR', 'History_Data/over_daily_market_data')
+    START_DATE = config.get('START_DATE', '2023-01-01')
+    END_DATE = config.get('END_DATE', '2024-12-30')
+    print(f"使用配置文件: {args.config}")
+    print(f"配置参数:")
+    print(f"  目标头寸目录: {TARGET_POSITION_DIR}")
+    print(f"  特定目录: {SPECIFIC_TARGET_DIR}")
+    print(f"  开始日期: {START_DATE}")
+    print(f"  结束日期: {END_DATE}")
+else:
+    # 默认配置参数
+    TARGET_POSITION_DIR = 'random_forest_strategy/target_position'
+    SPECIFIC_TARGET_DIR = ''
+    PRIMARY_DATA_DIR = 'History_Data/hot_daily_market_data'
+    SECONDARY_DATA_DIR = 'History_Data/secondary_daily_market_data'
+    OVER_DATA_DIR = 'History_Data/over_daily_market_data'
+    START_DATE = '2023-01-01'  # 回测开始日期
+    END_DATE = '2024-12-30'    # 回测结束日期
+    print("使用默认配置参数")
 
 
 
@@ -65,17 +92,27 @@ def load_all_target_positions(target_dir):
     # 获取最新的带时间戳的文件夹
     actual_dir = get_latest_target_position_dir(target_dir)
     
-    # 使用正确的路径格式
-    pattern = os.path.join(actual_dir, 'target_positions_*.csv')
-    files = glob.glob(pattern)
+    # 使用正确的路径格式，支持两种命名格式：target_positions_*.csv 和 *positions.csv
+    pattern1 = os.path.join(actual_dir, 'target_positions_*.csv')
+    pattern2 = os.path.join(actual_dir, '*_positions.csv')
+    files1 = glob.glob(pattern1)
+    files2 = glob.glob(pattern2)
+    # 合并所有匹配的文件
+    files = files1 + files2
     # 按日期排序
     files.sort()
     
     target_positions = {}
     for file in files:
         try:
-            # 从文件名提取日期，格式为YYYYMMDD
-            date_str = os.path.basename(file).split('_')[-1].split('.')[0]
+            # 从文件名提取日期，支持两种格式：target_positions_YYYYMMDD.csv 和 YYYYMMDD_positions.csv
+            file_name = os.path.basename(file)
+            if file_name.startswith('target_positions_'):
+                # 格式：target_positions_YYYYMMDD.csv
+                date_str = file_name.split('_')[2].split('.')[0]
+            else:
+                # 格式：YYYYMMDD_positions.csv
+                date_str = file_name.split('_')[0]
             date = datetime.strptime(date_str, '%Y%m%d')
             df = pd.read_csv(file)
             target_positions[date] = df
@@ -123,6 +160,11 @@ def load_all_history_data(primary_dir, secondary_dir):
     
     # 合并所有数据
     combined_df = pd.concat(all_data)
+    
+    # 确保索引是datetime类型
+    if not pd.api.types.is_datetime64_any_dtype(combined_df.index):
+        combined_df.index = pd.to_datetime(combined_df.index)
+    
     return combined_df
 
 
@@ -152,8 +194,11 @@ def backtest():
     
     # 过滤掉START_DATE之前和END_DATE之后的日期
     start_datetime = datetime.strptime(START_DATE, '%Y-%m-%d')
-    end_datetime = datetime.strptime(END_DATE, '%Y-%m-%d')
-    sorted_dates = [date for date in sorted_dates if start_datetime <= date <= end_datetime]
+    if END_DATE:
+        end_datetime = datetime.strptime(END_DATE, '%Y-%m-%d')
+        sorted_dates = [date for date in sorted_dates if start_datetime <= date <= end_datetime]
+    else:
+        sorted_dates = [date for date in sorted_dates if date >= start_datetime]
     
     # 初始化回测结果
     daily_returns = []
@@ -176,20 +221,30 @@ def backtest():
         # 获取当天的目标仓位
         target_df = target_positions[date]
         
-        # 计算次日日期
-        next_date = date + timedelta(days=1)
+        # 查找下一个交易日的数据，最多往后查找30天
+        max_days_to_check = 30
+        next_trading_day = None
+        next_day_data = None
         
-        # 过滤出下一个交易日的数据
-        next_trading_day_data = history_data[history_data.index > date].sort_index()
+        for i in range(1, max_days_to_check + 1):
+            check_date = date + timedelta(days=i)
+            # 过滤出该日期的数据
+            check_data = history_data[history_data.index == check_date]
+            if not check_data.empty:
+                next_trading_day = check_date
+                next_day_data = check_data
+                break
         
-        if next_trading_day_data.empty:
-            print(f"  警告：没有{date}之后的交易数据，跳过")
-            continue
-        
-        next_trading_day = next_trading_day_data.index[0]
-        
-        # 获取次日的完整数据（开盘价和收盘价）
-        next_day_data = next_trading_day_data.loc[next_trading_day:next_trading_day]
+        if next_trading_day is None:
+            # 如果30天内都没有找到数据，使用处理日期当天的数据
+            print(f"  警告：在{date}之后的30天内没有找到交易数据，使用处理日期当天的数据")
+            processing_day_data = history_data[history_data.index == date]
+            if not processing_day_data.empty:
+                next_trading_day = date
+                next_day_data = processing_day_data
+            else:
+                print(f"  警告：没有{date}当天的数据，跳过")
+                continue
         
         # 提取基础品种（去除月份）
         def get_base_symbol(symbol):
@@ -223,54 +278,67 @@ def backtest():
                     print(f"  检测到合约切换：{base_symbol} 从 {current_symbol} 切换到 {target_symbol}")
                     
                     # 平仓原有合约
-                    next_day_symbol_data = next_day_data[next_day_data['symbol'] == current_symbol]
-                    if next_day_symbol_data.empty:
-                        # 尝试从完整的history_data中查找该合约在next_trading_day的数据
-                        print(f"  警告：主力合约数据中没有{current_symbol}在{next_trading_day}的数据，尝试从完整历史数据中查找")
-                        full_symbol_data = history_data[(history_data.index == next_trading_day) & (history_data['symbol'] == current_symbol)]
-                        if not full_symbol_data.empty:
-                            next_day_symbol_data = full_symbol_data
-                            print(f"  从完整历史数据中找到了{current_symbol}在{next_trading_day}的数据")
-                        else:
-                            # 查找该合约在历史数据中最近一天的收盘价
-                            print(f"  警告：从完整历史数据中也没有找到{current_symbol}在{next_trading_day}的数据")
-                            contract_data = history_data[history_data['symbol'] == current_symbol]
-                            if not contract_data.empty:
-                                # 获取最近一天的收盘价
-                                latest_data = contract_data.sort_index().iloc[-1]
-                                latest_close = latest_data['close']
-                                latest_date = latest_data.name.strftime('%Y-%m-%d')
-                                print(f"  使用最近一天{latest_date}的收盘价{latest_close}作为平仓价格")
-                                
-                                # 计算合约乘数
-                                multiplier, _ = get_contract_multiplier(current_symbol)
-                                
-                                # 平仓盈亏（使用最近收盘价作为平仓价格，没有交易成本）
-                                close_pnl = -current_qty * (latest_close - latest_close) * multiplier
-                                
-                                # 记录交易
-                                daily_trades.append({
-                                    'date': date.strftime('%Y-%m-%d'),
-                                    'symbol': current_symbol,
-                                    'prev_position': current_qty,
-                                    'prev_close': latest_close,  # 使用最近收盘价作为持仓成本
-                                    'current_position': 0,
-                                    'current_close': latest_close,
-                                    'position_change': -current_qty,
-                                    'trade_price': latest_close,
-                                    'settlement_price': latest_close,
-                                    'trade_pnl': close_pnl,
-                                    'hold_pnl': 0.0,
-                                    'total_pnl': close_pnl,
-                                    'contract_multiplier': multiplier,
-                                    'transaction_type': '合约切换平仓（使用最近收盘价）'
-                                })
-                                
-                                # 从当前持仓中移除该合约
-                                del current_positions[current_symbol]
+                    # 查找该合约在next_trading_day及之后最多30天的数据
+                    next_day_symbol_data = None
+                    found = False
+                    max_days_to_check = 30
+                    
+                    for i in range(0, max_days_to_check + 1):
+                        check_date = next_trading_day + timedelta(days=i)
+                        check_data = history_data[(history_data.index == check_date) & (history_data['symbol'] == current_symbol)]
+                        if not check_data.empty:
+                            next_day_symbol_data = check_data
+                            found = True
+                            print(f"  从完整历史数据中找到了{current_symbol}在{check_date}的数据")
+                            break
+                    
+                    if not found:
+                        # 查找该合约在处理日期当天的收盘价
+                        print(f"  警告：从完整历史数据中也没有找到{current_symbol}在{next_trading_day}之后30天内的数据")
+                        contract_data = history_data[history_data['symbol'] == current_symbol]
+                        if not contract_data.empty:
+                            # 获取处理日期当天的收盘价
+                            processing_day_data = contract_data[contract_data.index == date]
+                            if not processing_day_data.empty:
+                                # 使用处理日期当天的收盘价
+                                processing_close = processing_day_data['close'].iloc[0]
+                                print(f"  使用处理日期{date.strftime('%Y-%m-%d')}的收盘价{processing_close}作为平仓价格")
                             else:
-                                print(f"  警告：找不到{current_symbol}的任何历史数据，无法平仓")
-                            continue
+                                # 如果处理日期当天也没有数据，使用该合约在历史数据中最后一次出现的收盘价
+                                latest_data = contract_data.sort_index().iloc[-1]
+                                processing_close = latest_data['close']
+                                latest_date = latest_data.name.strftime('%Y-%m-%d')
+                                print(f"  使用历史数据中最后一次出现日期{latest_date}的收盘价{processing_close}作为平仓价格")
+                            
+                            # 计算合约乘数
+                            multiplier, _ = get_contract_multiplier(current_symbol)
+                            
+                            # 平仓盈亏（使用处理日期收盘价作为平仓价格，没有交易成本）
+                            close_pnl = -current_qty * (processing_close - processing_close) * multiplier
+                            
+                            # 记录交易
+                            daily_trades.append({
+                                'date': date.strftime('%Y-%m-%d'),
+                                'symbol': current_symbol,
+                                'prev_position': current_qty,
+                                'prev_close': processing_close,  # 使用处理日期收盘价作为持仓成本
+                                'current_position': 0,
+                                'current_close': processing_close,
+                                'position_change': -current_qty,
+                                'trade_price': processing_close,
+                                'settlement_price': processing_close,
+                                'trade_pnl': close_pnl,
+                                'hold_pnl': 0.0,
+                                'total_pnl': close_pnl,
+                                'contract_multiplier': multiplier,
+                                'transaction_type': '合约切换平仓（使用处理日期收盘价）'
+                            })
+                            
+                            # 从当前持仓中移除该合约
+                            del current_positions[current_symbol]
+                        else:
+                            print(f"  警告：找不到{current_symbol}的任何历史数据，无法平仓")
+                        continue
                     
                     next_open = next_day_symbol_data['open'].iloc[0]
                     next_close = next_day_symbol_data['close'].iloc[0]
@@ -326,33 +394,52 @@ def backtest():
             # 变动手数
             position_change = current_position - prev_position
             
-            # 获取次日的开盘价和收盘价
-            next_day_symbol_data = next_day_data[next_day_data['symbol'] == symbol]
-            if next_day_symbol_data.empty:
-                # 尝试从完整的history_data中查找该合约在next_trading_day的数据
+            # 获取次日的开盘价和收盘价，最多往后查找30天
+            next_day_symbol_data = None
+            max_days_to_check = 30
+            
+            # 首先尝试在当前找到的next_trading_day查找
+            check_data = history_data[(history_data.index == next_trading_day) & (history_data['symbol'] == symbol)]
+            if not check_data.empty:
+                next_day_symbol_data = check_data
+            else:
+                # 如果当前next_trading_day没有数据，继续往后查找最多30天
                 print(f"  警告：没有{symbol}在{next_trading_day}的数据，尝试从完整历史数据中查找")
-                full_symbol_data = history_data[(history_data.index == next_trading_day) & (history_data['symbol'] == symbol)]
-                if not full_symbol_data.empty:
-                    next_day_symbol_data = full_symbol_data
-                    print(f"  从完整历史数据中找到了{symbol}在{next_trading_day}的数据")
-                else:
-                    # 查找该合约在历史数据中最近一天的收盘价
-                    print(f"  警告：从完整历史数据中也没有找到{symbol}在{next_trading_day}的数据")
+                found = False
+                for i in range(1, max_days_to_check + 1):
+                    check_date = next_trading_day + timedelta(days=i)
+                    check_data = history_data[(history_data.index == check_date) & (history_data['symbol'] == symbol)]
+                    if not check_data.empty:
+                        next_day_symbol_data = check_data
+                        print(f"  从完整历史数据中找到了{symbol}在{check_date}的数据")
+                        found = True
+                        break
+                
+                if not found:
+                    # 查找该合约在处理日期当天的收盘价
+                    print(f"  警告：从完整历史数据中也没有找到{symbol}在{next_trading_day}之后30天内的数据")
                     contract_data = history_data[history_data['symbol'] == symbol]
                     if not contract_data.empty:
-                        # 获取最近一天的收盘价
-                        latest_data = contract_data.sort_index().iloc[-1]
-                        latest_close = latest_data['close']
-                        latest_date = latest_data.name.strftime('%Y-%m-%d')
-                        print(f"  使用最近一天{latest_date}的收盘价{latest_close}作为交易价格")
+                        # 获取处理日期当天的收盘价
+                        processing_day_data = contract_data[contract_data.index == date]
+                        if not processing_day_data.empty:
+                            # 使用处理日期当天的收盘价
+                            processing_close = processing_day_data['close'].iloc[0]
+                            print(f"  使用处理日期{date.strftime('%Y-%m-%d')}的收盘价{processing_close}作为交易价格")
+                        else:
+                            # 如果处理日期当天也没有数据，使用该合约在历史数据中最后一次出现的收盘价
+                            latest_data = contract_data.sort_index().iloc[-1]
+                            processing_close = latest_data['close']
+                            latest_date = latest_data.name.strftime('%Y-%m-%d')
+                            print(f"  使用历史数据中最后一次出现日期{latest_date}的收盘价{processing_close}作为交易价格")
                         
                         # 创建模拟的next_day_symbol_data
                         next_day_symbol_data = pd.DataFrame({
                             'symbol': [symbol],
-                            'open': [latest_close],
-                            'close': [latest_close],
-                            'high': [latest_close],
-                            'low': [latest_close],
+                            'open': [processing_close],
+                            'close': [processing_close],
+                            'high': [processing_close],
+                            'low': [processing_close],
                             'volume': [0],
                             'money': [0],
                             'open_interest': [0]

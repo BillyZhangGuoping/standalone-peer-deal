@@ -2,6 +2,7 @@
 from __future__ import print_function, absolute_import
 from gm.api import *
 import pandas as pd
+import numpy as np
 from datetime import datetime
 import logging
 import os
@@ -556,8 +557,27 @@ class GmDataService:
             # 使用传入的symbol替代gm返回的特殊格式symbol
             history_data['symbol'] = symbol
             
-            # 只保留需要的列
-            required_columns = ['symbol', 'open', 'high', 'low', 'close', 'volume', 'money', 'open_interest']
+            # 添加缺失的列，使其与主力合约数据格式一致
+            # 添加high_limit, low_limit, avg列（这些是从get_history_symbol获取的，但我们这里无法获取，暂时设为NaN）
+            for col in ['high_limit', 'low_limit', 'avg']:
+                if col not in history_data.columns:
+                    history_data[col] = np.nan
+            
+            # 计算pre_close（前收盘价）
+            if 'close' in history_data.columns:
+                history_data['pre_close'] = history_data['close'].shift(1)
+                # 对于第一个数据点，将pre_close设为close
+                history_data['pre_close'].fillna(history_data['close'], inplace=True)
+            else:
+                history_data['pre_close'] = np.nan
+            
+            # 确保所有必要的列都存在
+            required_columns = ['symbol', 'open', 'high', 'low', 'close', 'volume', 'money', 'high_limit', 'low_limit', 'avg', 'open_interest', 'pre_close']
+            for col in required_columns:
+                if col not in history_data.columns:
+                    history_data[col] = np.nan
+            
+            # 只保留需要的列，确保顺序一致
             history_data = history_data[required_columns]
             
             # 处理缺失值

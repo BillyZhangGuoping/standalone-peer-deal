@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import talib
 from sklearn.preprocessing import StandardScaler
 
 class FeatureEngineer:
@@ -66,40 +67,25 @@ class FeatureEngineer:
         """添加技术指标特征"""
         # 计算简单移动平均线 (SMA)
         for window in self.window_sizes:
-            df[f'sma_{window}'] = df['close'].rolling(window=window).mean()
+            df[f'sma_{window}'] = talib.SMA(df['close'], timeperiod=window)
         
         # 计算指数移动平均线 (EMA)
         for window in self.window_sizes:
-            df[f'ema_{window}'] = df['close'].ewm(span=window, adjust=False).mean()
+            df[f'ema_{window}'] = talib.EMA(df['close'], timeperiod=window)
             # 价格与均线的偏差
             df[f'price_sma_ratio_{window}'] = df['close'] / df[f'sma_{window}']
             df[f'price_ema_ratio_{window}'] = df['close'] / df[f'ema_{window}']
         
         # 计算RSI
         for window in self.window_sizes:
-            delta = df['close'].diff(1)
-            gain = delta.where(delta > 0, 0)
-            loss = -delta.where(delta < 0, 0)
-            avg_gain = gain.rolling(window=window).mean()
-            avg_loss = loss.rolling(window=window).mean()
-            rs = avg_gain / avg_loss
-            df[f'rsi_{window}'] = 100 - (100 / (1 + rs))
+            df[f'rsi_{window}'] = talib.RSI(df['close'], timeperiod=window)
         
         # 计算MACD
-        exp12 = df['close'].ewm(span=12, adjust=False).mean()
-        exp26 = df['close'].ewm(span=26, adjust=False).mean()
-        df['macd'] = exp12 - exp26
-        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-        df['macd_hist'] = df['macd'] - df['macd_signal']
+        df['macd'], df['macd_signal'], df['macd_hist'] = talib.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
         
         # 计算ATR (Average True Range)
-        if all(col in df.columns for col in ['high', 'low']):
-            df['tr1'] = df['high'] - df['low']
-            df['tr2'] = abs(df['high'] - df['close'].shift(1))
-            df['tr3'] = abs(df['low'] - df['close'].shift(1))
-            df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
-            df['atr'] = df['tr'].rolling(window=14).mean()
-            df = df.drop(['tr1', 'tr2', 'tr3', 'tr'], axis=1)
+        if all(col in df.columns for col in ['high', 'low', 'close']):
+            df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
         
         return df
     

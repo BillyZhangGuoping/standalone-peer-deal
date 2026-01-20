@@ -41,30 +41,40 @@ class SequenceBuilder:
         return X, y, date_list
     
     def _align_time_indices(self, standardized_data):
-        """对齐所有品种的时间索引"""
-        # 获取所有品种的时间索引交集
-        common_indices = None
+        """对齐所有品种的时间索引，允许部分缺失值"""
+        # 获取所有品种的时间索引并集
+        all_indices = set()
         for variety, data in standardized_data.items():
-            if common_indices is None:
-                common_indices = set(data.index)
-            else:
-                common_indices = common_indices.intersection(set(data.index))
+            all_indices.update(set(data.index))
         
         # 按日期排序
-        common_indices = sorted(common_indices)
+        all_indices = sorted(all_indices)
+        
+        # 添加调试信息
+        print(f"Total unique dates across all varieties: {len(all_indices)}")
+        if all_indices:
+            print(f"Date range: {all_indices[0]} to {all_indices[-1]}")
         
         # 合并所有品种的特征，按品种顺序排列
         aligned_features = []
         variety_order = []
         
         for variety, data in standardized_data.items():
-            # 筛选共同日期的数据
-            variety_data = data.loc[common_indices]
+            # 筛选共同日期的数据，如果日期不存在则使用前一天的数据填充
+            variety_data = data.reindex(all_indices, method='ffill')
             aligned_features.append(variety_data)
             variety_order.append(variety)
         
         # 水平拼接所有品种的特征
         aligned_data = pd.concat(aligned_features, axis=1)
+        
+        # 使用0填充缺失值
+        aligned_data = aligned_data.fillna(0)
+        
+        # 添加调试信息
+        print(f"Dates after filling NA: {len(aligned_data)}")
+        if len(aligned_data) > 0:
+            print(f"Aligned date range: {aligned_data.index[0]} to {aligned_data.index[-1]}")
         
         # 保存品种顺序，用于后续解释模型输出
         self.variety_order = variety_order

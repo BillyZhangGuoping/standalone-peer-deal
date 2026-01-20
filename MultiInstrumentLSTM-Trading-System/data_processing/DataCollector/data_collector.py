@@ -4,17 +4,22 @@ import os
 from datetime import datetime
 
 class DataCollector:
-    def __init__(self, data_dir='History_Data', start_date='2015-01-01'):
+    def __init__(self, data_dir='../../History_Data/hot_daily_market_data', start_date='2015-01-01'):
         self.data_dir = data_dir
         self.start_date = start_date
+        # 加载品种信息，包括合约乘数和保证金比率
         self.varieties_info = self._load_varieties_info()
     
     def _load_varieties_info(self):
-        """加载品种信息，包括合约乘数等"""
-        # 这里假设品种信息存储在varieties_info.csv中
-        info_file = os.path.join(self.data_dir, 'varieties_info.csv')
+        """加载品种信息，包括合约乘数和保证金比率"""
+        # 加载根目录下的all_instruments_info.csv文件
+        info_file = '../History_Data/all_instruments_info.csv'
         if os.path.exists(info_file):
-            return pd.read_csv(info_file, index_col='variety')
+            info_df = pd.read_csv(info_file)
+            # 提取品种代码（从symbol列获取，如'A'、'AG'等）
+            info_df['variety'] = info_df['symbol'].str.split('.').str[-1]
+            # 提取交易所信息
+            return info_df.set_index('variety')
         else:
             # 如果没有品种信息文件，返回一个空的DataFrame
             return pd.DataFrame()
@@ -38,21 +43,18 @@ class DataCollector:
         file_path = os.path.join(self.data_dir, f'{variety}.csv')
         
         try:
-            data = pd.read_csv(file_path)
+            # 读取CSV文件，第一列作为索引（日期）
+            data = pd.read_csv(file_path, index_col=0)
             
             # 数据清洗
             data = self._clean_data(data)
             
-            # 检查数据是否满足要求：至少60个交易日，且每日交易量大于20000手
+            # 检查数据是否满足要求：至少60个交易日
             if len(data) < 60:
                 return None
             
             # 确保交易量列存在
             if 'volume' not in data.columns:
-                return None
-            
-            # 检查最近60个交易日的交易量是否都大于20000手
-            if (data['volume'].tail(60) < 20000).any():
                 return None
             
             return data
@@ -62,15 +64,8 @@ class DataCollector:
     
     def _clean_data(self, data):
         """数据清洗"""
-        # 确保日期列格式正确
-        if 'date' in data.columns:
-            data['date'] = pd.to_datetime(data['date'])
-            data = data.set_index('date')
-        # 处理索引列（当从CSV读取时，datetime索引会变成普通列）
-        elif data.columns[0] == 'Unnamed: 0':
-            data['date'] = pd.to_datetime(data[data.columns[0]])
-            data = data.set_index('date')
-            data = data.drop(columns=[data.columns[0]])
+        # 将索引转换为datetime
+        data.index = pd.to_datetime(data.index)
         
         # 删除重复行
         data = data.drop_duplicates()
@@ -84,6 +79,11 @@ class DataCollector:
         # 确保数据按日期排序
         data = data.sort_index()
         
+        # 重命名列，确保与系统其他部分兼容
+        if 'open' in data.columns and 'high' in data.columns and 'low' in data.columns and 'close' in data.columns:
+            # 保留需要的列
+            return data[['open', 'high', 'low', 'close', 'volume']]
+        
         return data
     
     def get_valid_varieties(self, all_data):
@@ -93,8 +93,6 @@ class DataCollector:
         for variety, data in all_data.items():
             # 检查是否有足够的历史数据（60个交易日）
             if len(data) >= 60:
-                # 检查最近60个交易日的交易量是否都大于20000手
-                if (data['volume'].tail(60) >= 20000).all():
-                    valid_varieties.append(variety)
+                valid_varieties.append(variety)
         
         return valid_varieties

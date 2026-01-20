@@ -146,7 +146,8 @@ def get_contract_multiplier(symbol):
     
     # 如果缓存为空，读取合约信息
     if _instrument_info_cache is None:
-        csv_path = os.path.join(os.path.dirname(__file__), 'all_instruments_info.csv')
+        # 从Market_Inform目录读取
+        csv_path = os.path.join(os.path.dirname(__file__), 'Market_Inform', 'all_instruments_info.csv')
         
         # 如果文件存在，从文件中读取并缓存
         if os.path.exists(csv_path):

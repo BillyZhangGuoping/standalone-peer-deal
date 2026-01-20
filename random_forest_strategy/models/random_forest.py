@@ -30,13 +30,28 @@ class RandomForestModel(BaseModel):
         返回：
         model: 训练好的随机森林模型
         """
-        # 创建并训练随机森林分类器，增加树的数量和深度，提高模型复杂度
-        self.params['n_estimators'] = 200
-        self.params['max_depth'] = 15
+        # 创建并训练随机森林分类器，优化参数提高模型性能
+        self.params['n_estimators'] = 300
+        self.params['max_depth'] = 20
+        self.params['min_samples_split'] = 5
+        self.params['min_samples_leaf'] = 2
+        self.params['bootstrap'] = True
+        self.params['oob_score'] = True
+        self.params['random_state'] = 42
         self.model = RandomForestClassifier(**self.params)
         
-        # 训练模型
-        self.model.fit(X_train, y_train)
+        # 为最近80天的数据设置更高的权重
+        sample_weights = np.ones(len(y_train))
+        
+        # 总数据量
+        total_samples = len(y_train)
+        
+        # 最近80天的权重设为1.5，其他数据设为1.0
+        if total_samples > 80:
+            sample_weights[-80:] = 1.5
+        
+        # 训练模型，添加样本权重
+        self.model.fit(X_train, y_train, sample_weight=sample_weights)
         
         # 保存特征列
         self.feature_columns = X_train.columns.tolist()

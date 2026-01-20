@@ -184,8 +184,8 @@ class BaseModel(ABC):
         
         # 只有在训练时才计算标签，预测时不计算
         if not is_prediction_data:
-            # 标签：1表示上涨，-1表示下跌，预测5个交易日后趋势
-            model_data['label'] = np.sign(model_data['close'].shift(-5) - model_data['close'])
+            # 标签：1表示上涨，-1表示下跌，预测1个交易日后趋势
+            model_data['label'] = np.sign(model_data['close'].shift(-1) - model_data['close'])
             
             # 再次移除NaN值，包括标签列
             model_data = model_data.dropna(subset=['label'])

@@ -19,7 +19,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from position_calculator import calculate_position_size
 from utility.instrument_utils import get_contract_multiplier
 from position import calculate_portfolio_metrics
-from risk_allocation import calculate_atr_allocation, atr_momentum_composite_allocation, enhanced_atr_allocation
+from risk_allocation import calculate_atr_allocation, atr_momentum_composite_allocation, enhanced_atr_allocation, cluster_risk_parity_allocation, enhanced_atr_cluster_risk_allocation, enhanced_sharpe_atr_allocation, model_based_allocation, signal_strength_based_allocation, floor_asset_tilt_allocation
+from risk_parity_allocation import risk_parity_allocation
 from utility.data_process import clean_data, normalize_data, standardize_data
 from utility.calc_funcs import calculate_ma, calculate_macd, calculate_rsi, calculate_bollinger_bands, calculate_atr, calculate_volume_weighted_average_price
 from utility.long_short_signals import generate_combined_signal, generate_ma_crossover_signal, generate_macd_signal, generate_rsi_signal, generate_bollinger_bands_signal
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # 模型缓存，键为品种，值为模型对象
 model_cache = {}
-PREDICT_INTERVAL = 100  # 每100次预测后重新训练模型
+PREDICT_INTERVAL = 80  # 每80次预测后重新训练模型
 
 class ModelManager:
     """模型管理器，用于管理不同模型的训练、预测和重训练"""
@@ -158,10 +159,13 @@ class ModelManager:
 
 # 配置参数
 CAPITAL = 3000000  # 总资金为三百万
-START_DATE = '2023-01-02'  # 开始日期
+START_DATE = '2025-01-01'  # 开始日期
+CLOSE_DATE = '2025-12-31'  # 结束日期
 RISK_PER_TRADE = 0.02  # 每笔交易风险比例
-DATA_DIR = 'History_Data/hot_daily_market_data'  # 历史数据目录
-OUTPUT_DIR = 'random_forest_strategy/target_position'  # 输出目录
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'History_Data', 'hot_daily_market_data')  # 历史数据目录
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'target_position')  # 输出目录，使用绝对路径确保在random_forest_strategy目录下
+ALLOCATION_STRATEGY = 'risk_parity'  # 分配策略: 'var' 或 'sharpe' 或 'cvar' 或 'calculate_atr' 或 'enhanced_atr' 或 'cluster_risk_parity' 或 'enhanced_atr_cluster_risk' 或 'enhanced_sharpe_atr' 或 'model_based' 或 'signal_strength' 或 'floor_asset_tilt' 或 'risk_parity'
+ALLOCATION_REOPTIMIZE_INTERVAL = 100  # 分配策略重新优化间隔（天）
 variety_list = ['i', 'rb', 'hc', 'jm', 'j', 'ss', 'ni', 'SF', 'SM', 'lc', 'sn', 'si', 'pb', 'cu', 'al', 'zn',
                 'ao', 'SH', 'au', 'ag', 'OI', 'a', 'b', 'm', 'RM', 'p', 'y', 'CF', 'SR', 'c', 'cs', 'AP', 'PK',
                 'jd', 'CJ', 'lh', 'sc', 'fu', 'lu', 'pg', 'bu', 'eg', 'TA', 'PF', 'PX', 'l', 'v', 'MA', 'pp',
@@ -225,7 +229,21 @@ def preprocess_data(data):
     data['ma_20'] = calculate_ma(data, 20)
     data['ma_60'] = calculate_ma(data, 60)
     
-    # 移除RSI和布林带等超买超卖指标，避免在长期趋势中发出错误信号
+    # 计算RSI
+    data['rsi'] = calculate_rsi(data)
+    
+    # 计算布林带（返回元组：upper_band, sma, lower_band）
+    bollinger_upper, bollinger_mid, bollinger_lower = calculate_bollinger_bands(data)
+    data['bollinger_mid'] = bollinger_mid
+    data['bollinger_upper'] = bollinger_upper
+    data['bollinger_lower'] = bollinger_lower
+    data['bollinger_percent'] = (data['close'] - bollinger_lower) / (bollinger_upper - bollinger_lower)
+    
+    # 计算MACD（返回元组：macd, signal, histogram）
+    macd, macd_signal, macd_histogram = calculate_macd(data)
+    data['macd'] = macd
+    data['macd_signal'] = macd_signal
+    data['macd_histogram'] = macd_histogram
     
     # 计算ATR
     data['atr'] = calculate_atr(data)
@@ -370,9 +388,9 @@ def preprocess_data(data):
     return data
 
 
-def generate_daily_target_positions(model_manager, all_data, start_date, capital):
+def generate_daily_target_positions(model_manager, all_data, start_date, capital, close_date=None):
     """生成每日目标头寸"""
-    logger.info(f"开始生成每日目标头寸，起始日期: {start_date}")
+    logger.info(f"开始生成每日目标头寸，起始日期: {start_date}, 结束日期: {close_date if close_date else '最新'}")
     
     # 创建带时间戳的输出文件夹
     from datetime import datetime
@@ -386,10 +404,23 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
     for data in all_data.values():
         all_dates.extend(data.index.tolist())
     all_dates = sorted(list(set(all_dates)))
-    all_dates = [date for date in all_dates if date >= datetime.strptime(start_date, '%Y-%m-%d')]
+    
+    # 转换日期格式
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    close_dt = datetime.strptime(close_date, '%Y-%m-%d') if close_date else None
+    
+    # 筛选交易日期
+    if close_dt:
+        all_dates = [date for date in all_dates if start_dt <= date <= close_dt]
+    else:
+        all_dates = [date for date in all_dates if date >= start_dt]
     
     # 初始化模型预测次数计数器
     predict_counts = {symbol: 0 for symbol in all_data.keys()}
+    
+    # 分配策略优化计数器
+    allocation_optimize_count = 0
+    last_optimize_date = None
     
     # 预先为每个品种预处理一次完整的数据，避免重复计算
     logger.info("开始预先预处理所有品种的数据...")
@@ -400,8 +431,56 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
     logger.info("所有品种数据预处理完成")
     
     # 遍历每个交易日
-    for date in all_dates:
+    for date_idx, date in enumerate(all_dates):
         logger.info(f"\n处理日期: {date.strftime('%Y-%m-%d')}")
+        
+        # 检查是否需要重新优化分配策略
+        if last_optimize_date is None or (date - last_optimize_date).days >= ALLOCATION_REOPTIMIZE_INTERVAL:
+            logger.info(f"\n开始重新优化分配策略...")
+            
+            # 收集过去180天的历史数据用于优化
+            lookback_days = 180
+            lookback_date = date - timedelta(days=lookback_days)
+            
+            # 收集这段时间内所有品种的收益率数据
+            historical_returns = pd.DataFrame()
+            for base_symbol, data in preprocessed_data.items():
+                # 获取该品种在回测期内的数据
+                symbol_data = data[(data.index >= lookback_date) & (data.index <= date)]
+                if len(symbol_data) > 0:
+                    # 计算收益率
+                    if 'return' not in symbol_data.columns:
+                        symbol_data['return'] = symbol_data['close'].pct_change()
+                    historical_returns[base_symbol] = symbol_data['return'].dropna()
+            
+            # 计算市场统计指标
+            if not historical_returns.empty:
+                # 计算市场平均波动率
+                market_volatility = historical_returns.std().mean()
+                # 计算平均相关性
+                correlation_matrix = historical_returns.corr()
+                avg_correlation = correlation_matrix.stack().mean()
+                
+                logger.info(f"市场分析结果 - 平均波动率: {market_volatility:.4f}, 平均相关性: {avg_correlation:.4f}")
+                
+                # 根据市场条件调整分配策略参数
+                # 这里可以添加更复杂的优化逻辑，例如：
+                # - 高波动市场：降低风险暴露
+                # - 高相关性市场：增加多样性权重
+                # - 低波动市场：增加趋势跟踪权重
+                
+                # 我们将这些参数存储在全局变量中，供分配函数使用
+                global allocation_optimization_params
+                allocation_optimization_params = {
+                    'market_volatility': market_volatility,
+                    'avg_correlation': avg_correlation,
+                    'optimize_date': date,
+                    'lookback_days': lookback_days
+                }
+            
+            last_optimize_date = date
+            allocation_optimize_count += 1
+            logger.info(f"分配策略重新优化完成，这是第{allocation_optimize_count}次优化")
         
         # 初始化每日目标头寸和品种数据
         daily_target_positions = []
@@ -478,17 +557,13 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
             # 获取合约乘数和保证金率
             contract_multiplier, margin_rate = get_contract_multiplier(contract_symbol)
             
-            # 获取ATR值（从predict_data的最后一行）
-            atr = predict_data['atr'].iloc[-1] if 'atr' in predict_data.columns else 0
-            
             # 获取价格历史数据（用于动量计算）
             # 取最近30天的收盘价
             prices = predict_data['close'].tail(30).tolist()
             
-            # 收集品种数据用于ATR动量复合分配
+            # 收集品种数据用于分配策略
             varieties_data[base_symbol] = {
                 'current_price': current_price,
-                'atr': atr,
                 'contract_multiplier': contract_multiplier,
                 'margin_rate': margin_rate,
                 'contract_symbol': contract_symbol,
@@ -500,100 +575,447 @@ def generate_daily_target_positions(model_manager, all_data, start_date, capital
             # 更新预测次数
             predict_counts[base_symbol] += 1
         
-        # 第二步：基于ATR的等风险资金分配
+        # 第二步：资金分配
         if varieties_data:
-            logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于ATR的等风险资金分配...")
+            # 收集所有品种的收益率数据
+            returns_data = pd.DataFrame()
+            for base_symbol, data in preprocessed_data.items():
+                # 提取品种的收益率数据
+                if 'return' not in data.columns:
+                    # 计算日收益率
+                    data['return'] = data['close'].pct_change()
+                
+                # 提取收益率数据
+                returns = data['return'].dropna()
+                
+                # 将收益率数据添加到DataFrame中
+                returns_data[base_symbol] = returns
             
-            # 使用增强型ATR分配策略
-            allocation, _ = enhanced_atr_allocation(capital, varieties_data)
+            # 根据配置选择分配策略
+            if ALLOCATION_STRATEGY == 'calculate_atr':
+                logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于ATR的资金分配...")
+                
+                # 使用ATR分配策略，返回元组：(allocation_dict, risk_units)
+                allocation_dict, risk_units = calculate_atr_allocation(capital, varieties_data)
+                
+                # 生成目标头寸
+                target_positions = []
+                for base_symbol, allocated_capital in allocation_dict.items():
+                    data = varieties_data[base_symbol]
+                    # 计算目标手数：目标手数 = 分配资金 / (当前价格 * 合约乘数 * 保证金率)
+                    price_multiplier = data['current_price'] * data['contract_multiplier'] * data['margin_rate']
+                    if price_multiplier > 0:
+                        base_quantity = int(allocated_capital / price_multiplier)
+                        # 根据信号调整方向
+                        direction = 1 if data['signal'] > 0 else -1
+                        position_size = base_quantity * direction
+                    else:
+                        position_size = 0
+                    
+                    position_dict = {
+                        'symbol': data['contract_symbol'],
+                        'current_price': data['current_price'],
+                        'contract_multiplier': data['contract_multiplier'],
+                        'position_size': position_size,
+                        'position_value': abs(position_size) * data['current_price'] * data['contract_multiplier'],
+                        'margin_usage': abs(position_size) * data['current_price'] * data['contract_multiplier'] * data['margin_rate'],
+                        'risk_amount': allocated_capital,
+                        'margin_rate': data['margin_rate'],
+                        'total_capital': capital,
+                        'signal': data['signal'],
+                        'risk_unit': risk_units[base_symbol],
+                        'notional_value': 0,  # 暂不使用notional_value概念
+                        'total_notional': 0,  # 暂不使用total_notional概念
+                        'price_multiplier': price_multiplier,
+                        'target_quantity': position_size
+                    }
+                    target_positions.append(position_dict)
+            elif ALLOCATION_STRATEGY == 'enhanced_atr':
+                logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于增强ATR的资金分配...")
+                
+                # 使用增强ATR分配策略，返回元组：(allocation_dict, risk_units)
+                allocation_dict, risk_units = enhanced_atr_allocation(capital, varieties_data)
+                
+                # 生成目标头寸
+                target_positions = []
+                for base_symbol, allocated_capital in allocation_dict.items():
+                    data = varieties_data[base_symbol]
+                    # 计算目标手数：目标手数 = 分配资金 / (当前价格 * 合约乘数 * 保证金率)
+                    price_multiplier = data['current_price'] * data['contract_multiplier'] * data['margin_rate']
+                    if price_multiplier > 0:
+                        base_quantity = int(allocated_capital / price_multiplier)
+                        # 根据信号调整方向
+                        direction = 1 if data['signal'] > 0 else -1
+                        position_size = base_quantity * direction
+                    else:
+                        position_size = 0
+                    
+                    position_dict = {
+                        'symbol': data['contract_symbol'],
+                        'current_price': data['current_price'],
+                        'contract_multiplier': data['contract_multiplier'],
+                        'position_size': position_size,
+                        'position_value': abs(position_size) * data['current_price'] * data['contract_multiplier'],
+                        'margin_usage': abs(position_size) * data['current_price'] * data['contract_multiplier'] * data['margin_rate'],
+                        'risk_amount': allocated_capital,
+                        'margin_rate': data['margin_rate'],
+                        'total_capital': capital,
+                        'signal': data['signal'],
+                        'risk_unit': risk_units[base_symbol],
+                        'notional_value': 0,  # 暂不使用notional_value概念
+                        'total_notional': 0,  # 暂不使用total_notional概念
+                        'price_multiplier': price_multiplier,
+                        'target_quantity': position_size
+                    }
+                    target_positions.append(position_dict)
+            elif ALLOCATION_STRATEGY == 'cluster_risk_parity':
+                logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于相关性聚类和风险平价的资金分配...")
+                
+                # 使用基于相关性聚类和风险平价的分配策略
+                # 返回元组：(allocation_dict, risk_units, cluster_weights)
+                allocation_dict, risk_units, cluster_weights = cluster_risk_parity_allocation(capital, varieties_data)
+                
+                logger.info(f"聚类分配权重：{cluster_weights}")
+                
+                # 生成目标头寸
+                target_positions = []
+                for base_symbol, allocated_capital in allocation_dict.items():
+                    data = varieties_data[base_symbol]
+                    # 计算目标手数：目标手数 = 分配资金 / (当前价格 * 合约乘数 * 保证金率)
+                    price_multiplier = data['current_price'] * data['contract_multiplier'] * data['margin_rate']
+                    if price_multiplier > 0:
+                        base_quantity = int(allocated_capital / price_multiplier)
+                        # 根据信号调整方向
+                        direction = 1 if data['signal'] > 0 else -1
+                        position_size = base_quantity * direction
+                    else:
+                        position_size = 0
+                    
+                    position_dict = {
+                        'symbol': data['contract_symbol'],
+                        'current_price': data['current_price'],
+                        'contract_multiplier': data['contract_multiplier'],
+                        'position_size': position_size,
+                        'position_value': abs(position_size) * data['current_price'] * data['contract_multiplier'],
+                        'margin_usage': abs(position_size) * data['current_price'] * data['contract_multiplier'] * data['margin_rate'],
+                        'risk_amount': allocated_capital,
+                        'margin_rate': data['margin_rate'],
+                        'total_capital': capital,
+                        'signal': data['signal'],
+                        'risk_unit': risk_units[base_symbol],
+                        'notional_value': 0,  # 暂不使用notional_value概念
+                        'total_notional': 0,  # 暂不使用total_notional概念
+                        'price_multiplier': price_multiplier,
+                        'target_quantity': position_size
+                    }
+                    target_positions.append(position_dict)
+            elif ALLOCATION_STRATEGY == 'enhanced_atr_cluster_risk':
+                logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于增强ATR聚类风险的资金分配...")
+                
+                # 使用增强型ATR聚类风险分配策略
+                # 返回元组：(allocation_dict, risk_units, cluster_weights)
+                allocation_dict, risk_units, cluster_weights = enhanced_atr_cluster_risk_allocation(capital, varieties_data)
+                
+                logger.info(f"聚类分配权重：{cluster_weights}")
+                
+                # 生成目标头寸
+                target_positions = []
+                for base_symbol, allocated_capital in allocation_dict.items():
+                    data = varieties_data[base_symbol]
+                    # 计算目标手数：目标手数 = 分配资金 / (当前价格 * 合约乘数 * 保证金率)
+                    price_multiplier = data['current_price'] * data['contract_multiplier'] * data['margin_rate']
+                    if price_multiplier > 0:
+                        base_quantity = int(allocated_capital / price_multiplier)
+                        # 根据信号调整方向
+                        direction = 1 if data['signal'] > 0 else -1
+                        position_size = base_quantity * direction
+                    else:
+                        position_size = 0
+                    
+                    position_dict = {
+                        'symbol': data['contract_symbol'],
+                        'current_price': data['current_price'],
+                        'contract_multiplier': data['contract_multiplier'],
+                        'position_size': position_size,
+                        'position_value': abs(position_size) * data['current_price'] * data['contract_multiplier'],
+                        'margin_usage': abs(position_size) * data['current_price'] * data['contract_multiplier'] * data['margin_rate'],
+                        'risk_amount': allocated_capital,
+                        'margin_rate': data['margin_rate'],
+                        'total_capital': capital,
+                        'signal': data['signal'],
+                        'risk_unit': risk_units[base_symbol],
+                        'notional_value': 0,  # 暂不使用notional_value概念
+                        'total_notional': 0,  # 暂不使用total_notional概念
+                        'price_multiplier': price_multiplier,
+                        'target_quantity': position_size
+                    }
+                    target_positions.append(position_dict)
+            elif ALLOCATION_STRATEGY == 'enhanced_sharpe_atr':
+                logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于夏普比率优化的增强型ATR资金分配...")
+                
+                # 使用基于夏普比率优化的增强型ATR分配策略
+                # 返回元组：(allocation_dict, risk_units)
+                # 传递市场参数，使策略能够根据市场条件动态调整
+                allocation_dict, risk_units = enhanced_sharpe_atr_allocation(capital, varieties_data, market_params=globals().get('allocation_optimization_params', None))
+                
+                # 生成目标头寸
+                target_positions = []
+                for base_symbol, allocated_capital in allocation_dict.items():
+                    data = varieties_data[base_symbol]
+                    # 计算目标手数：目标手数 = 分配资金 / (当前价格 * 合约乘数 * 保证金率)
+                    price_multiplier = data['current_price'] * data['contract_multiplier'] * data['margin_rate']
+                    if price_multiplier > 0:
+                        base_quantity = int(allocated_capital / price_multiplier)
+                        # 根据信号调整方向
+                        direction = 1 if data['signal'] > 0 else -1
+                        position_size = base_quantity * direction
+                    else:
+                        position_size = 0
+                    
+                    position_dict = {
+                        'symbol': data['contract_symbol'],
+                        'current_price': data['current_price'],
+                        'contract_multiplier': data['contract_multiplier'],
+                        'position_size': position_size,
+                        'position_value': abs(position_size) * data['current_price'] * data['contract_multiplier'],
+                        'margin_usage': abs(position_size) * data['current_price'] * data['contract_multiplier'] * data['margin_rate'],
+                        'risk_amount': allocated_capital,
+                        'margin_rate': data['margin_rate'],
+                        'total_capital': capital,
+                        'signal': data['signal'],
+                        'risk_unit': risk_units[base_symbol],
+                        'notional_value': 0,  # 暂不使用notional_value概念
+                        'total_notional': 0,  # 暂不使用total_notional概念
+                        'price_multiplier': price_multiplier,
+                        'target_quantity': position_size
+                    }
+                    target_positions.append(position_dict)
+            elif ALLOCATION_STRATEGY == 'model_based':
+                logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于LightGBM模型的资金分配...")
+                
+                # 使用基于LightGBM模型的分配策略
+                # 返回元组：(allocation_dict, risk_units)
+                # 传递市场参数，使策略能够根据市场条件动态调整
+                allocation_dict, risk_units = model_based_allocation(capital, varieties_data, market_params=globals().get('allocation_optimization_params', None))
+                
+                # 生成目标头寸
+                target_positions = []
+                for base_symbol, allocated_capital in allocation_dict.items():
+                    data = varieties_data[base_symbol]
+                    # 计算目标手数：目标手数 = 分配资金 / (当前价格 * 合约乘数 * 保证金率)
+                    price_multiplier = data['current_price'] * data['contract_multiplier'] * data['margin_rate']
+                    if price_multiplier > 0:
+                        base_quantity = int(allocated_capital / price_multiplier)
+                        # 根据信号调整方向
+                        direction = 1 if data['signal'] > 0 else -1
+                        position_size = base_quantity * direction
+                    else:
+                        position_size = 0
+                    
+                    position_dict = {
+                        'symbol': data['contract_symbol'],
+                        'current_price': data['current_price'],
+                        'contract_multiplier': data['contract_multiplier'],
+                        'position_size': position_size,
+                        'position_value': abs(position_size) * data['current_price'] * data['contract_multiplier'],
+                        'margin_usage': abs(position_size) * data['current_price'] * data['contract_multiplier'] * data['margin_rate'],
+                        'risk_amount': allocated_capital,
+                        'margin_rate': data['margin_rate'],
+                        'total_capital': capital,
+                        'signal': data['signal'],
+                        'risk_unit': risk_units[base_symbol],
+                        'notional_value': 0,  # 暂不使用notional_value概念
+                        'total_notional': 0,  # 暂不使用total_notional概念
+                        'price_multiplier': price_multiplier,
+                        'target_quantity': position_size
+                    }
+                    target_positions.append(position_dict)
+            elif ALLOCATION_STRATEGY == 'signal_strength':
+                logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于信号强度的资金分配...")
+                
+                # 使用基于信号强度的分配策略
+                # 返回元组：(allocation_dict, risk_units)
+                allocation_dict, risk_units = signal_strength_based_allocation(capital, varieties_data)
+                
+                # 生成目标头寸
+                target_positions = []
+                for base_symbol, allocated_capital in allocation_dict.items():
+                    data = varieties_data[base_symbol]
+                    # 计算目标手数：目标手数 = 分配资金 / (当前价格 * 合约乘数 * 保证金率)
+                    price_multiplier = data['current_price'] * data['contract_multiplier'] * data['margin_rate']
+                    if price_multiplier > 0:
+                        base_quantity = int(allocated_capital / price_multiplier)
+                        # 根据信号调整方向
+                        direction = 1 if data['signal'] > 0 else -1
+                        position_size = base_quantity * direction
+                    else:
+                        position_size = 0
+                    
+                    position_dict = {
+                        'symbol': data['contract_symbol'],
+                        'current_price': data['current_price'],
+                        'contract_multiplier': data['contract_multiplier'],
+                        'position_size': position_size,
+                        'position_value': abs(position_size) * data['current_price'] * data['contract_multiplier'],
+                        'margin_usage': abs(position_size) * data['current_price'] * data['contract_multiplier'] * data['margin_rate'],
+                        'risk_amount': allocated_capital,
+                        'margin_rate': data['margin_rate'],
+                        'total_capital': capital,
+                        'signal': data['signal'],
+                        'atr': data['atr'],
+                        'risk_unit': risk_units[base_symbol],
+                        'notional_value': 0,  # 暂不使用notional_value概念
+                        'total_notional': 0,  # 暂不使用total_notional概念
+                        'price_multiplier': price_multiplier,
+                        'target_quantity': position_size
+                    }
+                    target_positions.append(position_dict)
+            elif ALLOCATION_STRATEGY == 'floor_asset_tilt':
+                logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行地板资产倾斜 (sign/Vol) 资金分配...")
+                
+                # 使用地板资产倾斜 (sign/Vol) 分配策略
+                # 返回元组：(allocation_dict, risk_units)
+                allocation_dict, risk_units = floor_asset_tilt_allocation(capital, varieties_data)
+                
+                # 生成目标头寸
+                target_positions = []
+                for base_symbol, allocated_capital in allocation_dict.items():
+                    data = varieties_data[base_symbol]
+                    # 计算目标手数：目标手数 = 分配资金 / (当前价格 * 合约乘数 * 保证金率)
+                    price_multiplier = data['current_price'] * data['contract_multiplier'] * data['margin_rate']
+                    if price_multiplier > 0:
+                        base_quantity = int(allocated_capital / price_multiplier)
+                        # 根据信号调整方向
+                        direction = 1 if data['signal'] > 0 else -1
+                        position_size = base_quantity * direction
+                    else:
+                        position_size = 0
+                    
+                    position_dict = {
+                        'symbol': data['contract_symbol'],
+                        'current_price': data['current_price'],
+                        'contract_multiplier': data['contract_multiplier'],
+                        'position_size': position_size,
+                        'position_value': abs(position_size) * data['current_price'] * data['contract_multiplier'],
+                        'margin_usage': abs(position_size) * data['current_price'] * data['contract_multiplier'] * data['margin_rate'],
+                        'risk_amount': allocated_capital,
+                        'margin_rate': data['margin_rate'],
+                        'total_capital': capital,
+                        'signal': data['signal'],
+                        'risk_unit': risk_units[base_symbol],
+                        'notional_value': 0,  # 暂不使用notional_value概念
+                        'total_notional': 0,  # 暂不使用total_notional概念
+                        'price_multiplier': price_multiplier,
+                        'target_quantity': position_size
+                    }
+                    target_positions.append(position_dict)
+            elif ALLOCATION_STRATEGY == 'risk_parity':
+                logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行风险平价资金分配...")
+                
+                # 使用风险平价分配策略
+                # 返回元组：(allocation_dict, risk_units)
+                allocation_dict, risk_units = risk_parity_allocation(capital, varieties_data, date, all_data)
+                
+                # 生成目标头寸
+                target_positions = []
+                for base_symbol, allocated_capital in allocation_dict.items():
+                    data = varieties_data[base_symbol]
+                    # 计算目标手数：目标手数 = 分配资金 / (当前价格 * 合约乘数 * 保证金率)
+                    price_multiplier = data['current_price'] * data['contract_multiplier'] * data['margin_rate']
+                    if price_multiplier > 0:
+                        base_quantity = int(allocated_capital / price_multiplier)
+                        # 根据信号调整方向
+                        direction = 1 if data['signal'] > 0 else -1
+                        position_size = base_quantity * direction
+                    else:
+                        position_size = 0
+                    
+                    position_dict = {
+                        'symbol': data['contract_symbol'],
+                        'current_price': data['current_price'],
+                        'contract_multiplier': data['contract_multiplier'],
+                        'position_size': position_size,
+                        'position_value': abs(position_size) * data['current_price'] * data['contract_multiplier'],
+                        'margin_usage': abs(position_size) * data['current_price'] * data['contract_multiplier'] * data['margin_rate'],
+                        'risk_amount': allocated_capital,
+                        'margin_rate': data['margin_rate'],
+                        'total_capital': capital,
+                        'signal': data['signal'],
+                        'risk_unit': risk_units[base_symbol],
+                        'notional_value': 0,  # 暂不使用notional_value概念
+                        'total_notional': 0,  # 暂不使用total_notional概念
+                        'price_multiplier': price_multiplier,
+                        'target_quantity': position_size
+                    }
+                    target_positions.append(position_dict)
             
-            # 第三步：为每个品种计算目标头寸
-            for base_symbol, data in varieties_data.items():
-                # 获取品种信息
-                current_price = data['current_price']
-                contract_symbol = data['contract_symbol']
-                contract_multiplier = data['contract_multiplier']
-                margin_rate = data['margin_rate']
-                trend_strength = data['signal']  # 现在是趋势强度（-1.0到1.0）
-                atr = data['atr']
+            # 其他分配策略已弃用，仅保留enhanced_atr策略
+            # elif ALLOCATION_STRATEGY == 'sharpe':
+            #     logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于夏普比率的资金分配...")
+            #     
+            #     # 创建夏普比率分配实例
+
+            #     
+            #     # 使用夏普比率分配策略生成目标头寸
+            #     target_positions = sharpe_allocator.generate_target_positions(varieties_data, returns_data)
+            # 
+            # elif ALLOCATION_STRATEGY == 'cvar':
+            #     logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于CVaR的资金分配...")
+            #     
+            #     # 创建CVaR分配实例
+
+            #     
+            #     # 使用CVaR分配策略生成目标头寸
+            #     target_positions = cvar_allocator.generate_target_positions(varieties_data, returns_data)
+            # 
+            # else:  # 默认使用VaR
+            #     logger.info(f"共有 {len(varieties_data)} 个品种有交易信号，开始进行基于VaR的资金分配...")
+            #     
+            #     # 创建VaR分配实例
+
+            #     
+            #     # 使用VaR分配策略生成目标头寸
+            #     target_positions = var_allocator.generate_target_positions(varieties_data, returns_data)
+            
+            # 将生成的头寸添加到每日目标头寸列表中
+            for position in target_positions:
+                symbol = position['symbol']
+                base_symbol = symbol.split('.')[0] if '.' in symbol else symbol
                 
-                # 获取分配的资金
-                allocated_capital = allocation[base_symbol]
+                # 提取品种的基础信息
+                if base_symbol in varieties_data:
+                    data = varieties_data[base_symbol]
+                    position['trend_direction'] = 1 if data['signal'] > 0 else -1
+                    position['trend_strength'] = data['trend_strength']
+                    position['trend_strength_reference'] = data['trend_strength']
+                    position['model_type'] = 'random_forest_strategy'
+                    position['market_value'] = position['position_value'] if position['trend_direction'] == 1 else -position['position_value']
                 
-                # 计算目标手数
-                # 充分利用保证金杠杆：手数 = 分配资金 / (当前价格 * 合约乘数 * 保证金率)
-                # 这样可以用更少的资金（保证金）持有更大的头寸
-                price_multiplier = current_price * contract_multiplier * margin_rate
-                target_quantity = int(allocated_capital / price_multiplier)
-                
-                # 根据趋势强度调整方向和大小
-                # 方向由趋势强度的符号决定
-                direction = 1 if trend_strength > 0 else -1
-                # 大小可以考虑趋势强度的绝对值，趋势越强，仓位越大
-                # 这里使用基础手数乘以趋势强度的绝对值来调整仓位大小
-                target_quantity = int(target_quantity * abs(trend_strength) * direction)
-                
-                # 调试信息：打印计算过程
-                logger.debug(f"品种 {base_symbol}: 分配资金={allocated_capital:.2f}, 当前价格={current_price}, 合约乘数={contract_multiplier}, 价格*乘数={price_multiplier:.2f}, 趋势强度={trend_strength:.4f}, 计算手数={target_quantity}")
-                
-                # 确保至少有1手（如果趋势强度足够强）
-                if abs(target_quantity) < 1 and abs(trend_strength) > 0.3:  # 趋势强度超过0.3才考虑开仓
-                    logger.debug(f"品种 {base_symbol}: 计算手数小于1，调整为1手")
-                    target_quantity = direction  # 至少1手
-                
-                # 确保手数不为0
-                if target_quantity == 0:
-                    continue
-                
-                # 计算持仓价值
-                position_value = abs(target_quantity) * current_price * contract_multiplier
-                
-                # 计算保证金占用
-                margin_usage = position_value * margin_rate
-                
-                # 取消单品种保证金占用约束
-                
-                # 计算风险暴露
-                risk_exposure = position_value / capital
-                
-                # 计算实际风险金额
-                # 风险金额 = 持仓价值 * 保证金率
-                actual_risk_amount = margin_usage
-                
-                # 构建头寸字典
-                position_dict = {
-                    'symbol': contract_symbol,
-                    'current_price': current_price,
-                    'contract_multiplier': contract_multiplier,
-                    'position_size': target_quantity,
-                    'position_value': position_value,
-                    'margin_usage': margin_usage,
-                    'risk_amount': actual_risk_amount,  # 使用实际风险金额（保证金占用）
-                    'margin_rate': margin_rate,
-                    'total_capital': capital,
-                    'signal': data['signal'],  # 保存原始信号，-1.0到1.0
-                    'trend_direction': direction,  # 保存趋势方向
-                    'trend_strength': data['trend_strength'],  # 保存趋势强度（预测概率）
-                    'trend_strength_reference': data['trend_strength'],  # 趋势强度参考列
-                    'model_type': 'random_forest_strategy',
-                    'market_value': position_value if direction == 1 else -position_value,
-                    'allocated_capital': allocated_capital,
-                    'atr': atr
-                }
-                
-                daily_target_positions.append(position_dict)
+                daily_target_positions.append(position)
+        
+        # 第四步：过滤掉position_size为0的品种
+        if daily_target_positions:
+            daily_target_positions = [position for position in daily_target_positions if position['position_size'] != 0]
         
         # 保存每日目标头寸到文件
+        logger.info(f"每日目标头寸长度: {len(daily_target_positions)}")
         if daily_target_positions:
             positions_df = pd.DataFrame(daily_target_positions)
+            logger.info(f"positions_df形状: {positions_df.shape}")
+            logger.info(f"positions_df内容: {positions_df.head()}")
             # 只保留position_size不为0的品种
             positions_df = positions_df[positions_df['position_size'] != 0]
-            
-            # 保存到文件
-            positions_file = os.path.join(output_dir, f'target_positions_{date.strftime("%Y%m%d")}.csv')
-            positions_df.to_csv(positions_file, index=False)
-            logger.info(f"目标头寸已保存到 {positions_file}")
-            logger.info(f"生成了 {len(positions_df)} 个品种的目标头寸")
+            logger.info(f"过滤后positions_df形状: {positions_df.shape}")
+            if not positions_df.empty:
+                # 保存到文件
+                positions_file = os.path.join(output_dir, f'target_positions_{date.strftime("%Y%m%d")}.csv')
+                positions_df.to_csv(positions_file, index=False)
+                logger.info(f"目标头寸已保存到 {positions_file}")
+                logger.info(f"生成了 {len(positions_df)} 个品种的目标头寸")
+            else:
+                logger.info(f"所有品种的position_size均为0，跳过保存")
+        else:
+            logger.info(f"当日没有生成目标头寸")
 
 
 def main():
@@ -609,7 +1031,7 @@ def main():
     model_manager = ModelManager(model_type='random_forest')
     
     # 生成每日目标头寸
-    generate_daily_target_positions(model_manager, all_data, START_DATE, CAPITAL)
+    generate_daily_target_positions(model_manager, all_data, START_DATE, CAPITAL, CLOSE_DATE)
     
     logger.info("随机森林策略运行完成")
 

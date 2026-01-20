@@ -3,7 +3,7 @@ import numpy as np
 import os
 
 # Create sample data for multiple instruments
-def generate_sample_data(instrument_name, start_date='2015-01-01', end_date='2023-12-31'):
+def generate_sample_data(instrument_name, start_date='2015-01-01', end_date='2025-12-31'):
     # Generate date range
     dates = pd.date_range(start=start_date, end=end_date, freq='D')
     n_days = len(dates)

@@ -12,7 +12,7 @@
 import numpy as np
 import pandas as pd
 from scipy import stats
-import numba as nb  # 可选加速，无需则注释@nb.jit
+# import numba as nb  # 可选加速，无需则注释@nb.jit
 
 # ===================== 1. 核心配置（用户可根据回测调优） =====================
 # 分板块窗口期配置
@@ -70,9 +70,9 @@ def check_data_sufficient(price_series, window):
     return True
 
 # ===================== 3. 统计信号计算（斜率t统计量） =====================
-@nb.jit(nopython=True)
+# @nb.jit(nopython=True)
 def linear_reg_tstat(y):
-    """Numba加速：计算价格序列的斜率和t统计量"""
+    """计算价格序列的斜率和t统计量"""
     n = len(y)
     x = np.arange(n)
     x_mean = np.mean(x)
@@ -239,27 +239,63 @@ def generate_daily_trend_signal(close_data):
 
 # ===================== 7. 测试代码（验证功能） =====================
 if __name__ == "__main__":
-    # 模拟64品种复权收盘价数据
-    np.random.seed(42)
-    variety_list = []
-    for plate_vars in PLATES.values():
-        variety_list.extend(plate_vars)
-    variety_list = list(set(variety_list))[:64]  # 确保64个品种
+    # 从History_Data/hot_daily_market_data目录加载正式历史数据
+    import os
     
-    date_range = pd.date_range(start="2024-01-01", end="2024-12-31", freq="D")
-    close_data = pd.DataFrame(
-        np.random.randn(len(date_range), len(variety_list)).cumsum(axis=0) + 100,
-        columns=variety_list,
-        index=date_range
-    )
+    # 定义数据目录
+    DATA_DIR = "../History_Data/hot_daily_market_data"
     
-    # 生成次日趋势信号
+    # 获取所有CSV文件
+    csv_files = [f for f in os.listdir(DATA_DIR) if f.endswith('.csv')]
+    
+    # 初始化一个空的DataFrame用于存储所有品种的收盘价
+    close_data = pd.DataFrame()
+    
+    # 遍历所有CSV文件，提取收盘价数据
+    for file in csv_files:
+        # 提取品种代码（文件名的前部分，如A.csv -> A）
+        variety = file.split('.')[0].upper()
+        
+        # 读取文件
+        file_path = os.path.join(DATA_DIR, file)
+        df = pd.read_csv(file_path, index_col=0, parse_dates=True)
+        
+        # 提取收盘价，并添加到close_data中
+        if 'close' in df.columns:
+            # 使用品种名称作为列名，收盘价作为值
+            close_series = df['close']
+            close_series.name = variety
+            
+            # 合并到主DataFrame
+            if close_data.empty:
+                close_data = pd.DataFrame(close_series)
+            else:
+                close_data = pd.merge(close_data, pd.DataFrame(close_series), left_index=True, right_index=True, how='outer')
+    
+    # 确保索引是日期类型
+    close_data.index = pd.to_datetime(close_data.index)
+    
+    # 按日期排序
+    close_data = close_data.sort_index()
+    
+    # 过滤出2024年1月1日至2025年1月2日的数据
+    start_date = '2024-01-01'
+    end_date = '2025-01-02'
+    close_data = close_data.loc[start_date:end_date]
+    
+    # 打印数据基本信息
+    print(f"=== 加载的数据信息 ===")
+    print(f"数据日期范围: {close_data.index.min()} 至 {close_data.index.max()}")
+    print(f"包含品种数量: {len(close_data.columns)}")
+    print(f"数据形状: {close_data.shape}")
+    
+    # 生成2025-1-2日的次日趋势信号（即2025-1-3日的信号）
     trend_signal_df = generate_daily_trend_signal(close_data)
     
-    # 打印结果（前10个品种）
-    print("\n=== 次日64品种趋势信号（前10个）===")
-    print(trend_signal_df.head(10))
+    # 打印结果
+    print("\n=== 2025-1-3日64品种趋势信号（按品种排序）===")
+    print(trend_signal_df.sort_values(by="品种"))
     
-    # 保存结果（可选）
-    trend_signal_df.to_csv("次日趋势信号.csv", index=False, encoding="utf-8-sig")
-    print("\n=== 结果已保存至：次日趋势信号.csv ===")
+    # 保存结果
+    trend_signal_df.to_csv("2025-01-03_趋势信号.csv", index=False, encoding="utf-8-sig")
+    print("\n=== 结果已保存至：2025-01-03_趋势信号.csv ===")
